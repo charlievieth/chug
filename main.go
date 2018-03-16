@@ -13,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
+
+	"github.com/charlievieth/chug/color"
 )
 
 type LogLevel int
@@ -125,6 +128,8 @@ func ParseEntry(b []byte) (e Entry) {
 		Message:   log.Message,
 		Data:      log.Data,
 	}
+
+	// parse only what we need from Data
 	switch {
 	case log.LogLevel == ERROR || log.LogLevel == FATAL:
 		var data ErrorData
@@ -282,20 +287,48 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 
 // unquote, returns the unquoted form of JSON value b
 func unquote(b []byte) []byte {
-	if len(b) >= 2 && b[0] == '"' || b[len(b)-1] == '"' {
+	if len(b) >= 2 && b[0] == '"' && b[len(b)-1] == '"' {
 		return b[1 : len(b)-1]
 	}
 	return b
 }
 
 type CombinedFormat struct {
-	Timestamp Timestamp       `json:"timestamp"`
-	Source    string          `json:"source"`
-	Message   string          `json:"message"`
-	LogLevel  LogLevel        `json:"level,log_level"`
-	Data      json.RawMessage `json:"data"` // lazily parsed
-	Error     error           `json:"-"`
+	Timestamp Timestamp `json:"timestamp"`
+	Source    string    `json:"source"`
+	Message   string    `json:"message"`
+	// WARN: This does not work for LogFormatV2
+	LogLevel LogLevel        `json:"log_level"`
+	Data     json.RawMessage `json:"data"` // lazily parsed
+	Error    error           `json:"-"`
 }
+
+// func (c *CombinedFormat) UnmarshalJSON(data []byte) error {
+// 	type InternalFormat struct {
+// 		Timestamp Timestamp       `json:"timestamp"`
+// 		Source    string          `json:"source"`
+// 		Message   string          `json:"message"`
+// 		Level     LogLevel        `json:"level"`
+// 		LogLevel  LogLevel        `json:"log_level"`
+// 		Data      json.RawMessage `json:"data"` // lazily parsed
+// 		Error     error           `json:"-"`
+// 	}
+// 	var x InternalFormat
+// 	if err := json.Unmarshal(data, &x); err != nil {
+// 		return err
+// 	}
+// 	c.Timestamp = x.Timestamp
+// 	c.Source = x.Source
+// 	c.Message = x.Message
+// 	c.Data = x.Data
+// 	c.Error = x.Error
+// 	if x.Level > x.LogLevel {
+// 		c.LogLevel = x.Level
+// 	} else {
+// 		c.LogLevel = x.LogLevel
+// 	}
+// 	return nil
+// }
 
 func ParseFile(name string) ([]CombinedFormat, error) {
 	f, err := os.Open(name)
@@ -421,14 +454,179 @@ func Walk(root string) []Entry {
 	return all
 }
 
+type Printer struct {
+	w   io.Writer
+	buf bytes.Buffer
+}
+
+func SourceColor(source string) string {
+	n := strings.IndexByte(source, ':')
+	if n != -1 {
+		source = source[:n]
+	}
+	switch source {
+	case "auctioneer":
+		return "\x1b[95m"
+	case "bbs":
+		return "\x1b[36m"
+	case "converger":
+		return "\x1b[94m"
+	case "executor":
+		return "\x1b[92m"
+	case "file-server":
+		return "\x1b[34m"
+	case "garden-linux":
+		return "\x1b[35m"
+	case "loggregator":
+		return "\x1b[33m"
+	case "nsync-listener":
+		return "\x1b[98m"
+	case "rep":
+		return "\x1b[93m"
+	case "route-emitter":
+		return "\x1b[96m"
+	case "router":
+		return "\x1b[32m"
+	case "tps":
+		return "\x1b[97m"
+	default:
+		return "\x1b[0m"
+	}
+}
+
+func (p *Printer) reset() { p.buf.Reset() }
+
+func (p *Printer) padString(pad int, s string) {
+	p.buf.WriteString(s)
+	width := pad - utf8.RuneCountInString(s)
+	if width > 0 {
+		for i := 0; i < width; i++ {
+			p.buf.WriteByte(' ')
+		}
+	}
+}
+
+func (p *Printer) padStringColor(pad int, code, str string) {
+	p.buf.WriteString(code)
+	p.buf.WriteString(str)
+	width := pad - utf8.RuneCountInString(str)
+	if width > 0 {
+		for i := 0; i < width; i++ {
+			p.buf.WriteByte(' ')
+		}
+	}
+	p.buf.WriteString(color.StyleDefault)
+}
+
+func (p *Printer) stringColor(code, str string) {
+	p.buf.WriteString(code)
+	p.buf.WriteString(str)
+	p.buf.WriteString(color.StyleDefault)
+}
+
+func (p *Printer) indentBytes(pad int, s []byte) {
+	padding := make([]byte, pad) // TODO: this is wasteful - fix
+	for i := range padding {
+		padding[i] = ' '
+	}
+	for {
+		n := bytes.IndexByte(s, '\n')
+		if n < 0 {
+			break
+		}
+		p.buf.Write(padding)
+		p.buf.Write(s[:n+1]) // include newline
+		s = s[n+1:]
+	}
+	p.buf.Write(padding)
+	p.buf.Write(s) // WARN: make sure this is right
+	p.buf.WriteByte('\n')
+}
+
+func (p *Printer) indentString(pad int, s string) {
+	padding := make([]byte, pad) // TODO: this is wasteful - fix
+	for i := range padding {
+		padding[i] = ' '
+	}
+	for {
+		n := strings.IndexByte(s, '\n')
+		if n < 0 {
+			break
+		}
+		p.buf.Write(padding)
+		p.buf.WriteString(s[:n+1]) // include newline
+		s = s[n+1:]
+	}
+	p.buf.Write(padding)
+	p.buf.WriteString(s) // WARN: make sure this is right
+	p.buf.WriteByte('\n')
+}
+
+func (p *Printer) indentStringColor(pad int, code, s string) {
+	p.buf.WriteString(code)
+	p.indentString(pad, s)
+	p.buf.WriteString(color.StyleDefault)
+}
+
+func (p *Printer) Pretty(log *LogEntry) error {
+	p.reset()
+	code := SourceColor(log.Source)
+	p.padStringColor(16, code, log.Source)
+	p.buf.WriteByte(' ')
+	switch log.LogLevel {
+	case DEBUG:
+		p.padStringColor(7, color.ColorGray, "[DEBUG]")
+	case INFO:
+		p.padStringColor(7, code, "[INFO]")
+	case ERROR:
+		p.padStringColor(7, color.ColorRed, "[ERROR]")
+	case FATAL:
+		p.padStringColor(7, color.ColorRed, "[FATAL]")
+	}
+	p.buf.WriteByte(' ')
+	p.stringColor(code, log.Timestamp.Format("01/02 15:04:05.00"))
+	p.buf.WriteByte(' ')
+	p.padStringColor(10, color.ColorGray, log.Session)
+	p.buf.WriteByte(' ')
+	p.stringColor(code, log.Message)
+	p.buf.WriteByte('\n')
+
+	if log.Error != "" {
+		p.indentStringColor(27, color.ColorRed, log.Error)
+	}
+	if log.Trace != "" {
+		p.indentStringColor(27, color.ColorRed, log.Trace)
+	}
+	// TODO: strip 'session', 'error' and 'trace'
+	if len(log.Data) != 0 {
+		p.indentBytes(27, log.Data)
+	}
+
+	_, err := p.buf.WriteTo(p.w)
+	return err
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		Fatal("USAGE: PATH")
 	}
+	p := Printer{w: os.Stdout}
 	ents := Walk(os.Args[1])
-	fmt.Println("Entries:", len(ents))
+	for _, e := range ents {
+		if err := p.Pretty(e.Log); err != nil {
+			Fatal(err)
+		}
+	}
 
-	// data := []byte(`{"level": 3, "log_level": "info"}`)
+	// enc := json.NewEncoder(os.Stdout)
+	// for _, e := range ents {
+	// 	if err := enc.Encode(e.Log); err != nil {
+	// 		Fatal(err)
+	// 	}
+	// }
+	// fmt.Println("Entries:", len(ents))
+
+	// data := []byte(`{"level": "fatal"}`)
 	// var f CombinedFormat
 	// if err := json.Unmarshal(data, &f); err != nil {
 	// 	Fatal(err)

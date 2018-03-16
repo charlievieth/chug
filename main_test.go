@@ -1,6 +1,43 @@
 package main
 
-import "testing"
+import (
+	"bytes"
+	"compress/gzip"
+	"io/ioutil"
+	"os"
+	"testing"
+)
+
+var RepLogData *bytes.Reader
+
+func init() {
+	f, err := os.Open("testdata/rep.out.log.gz")
+	if err != nil {
+		panic(err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		panic(err)
+	}
+	data, err := ioutil.ReadAll(gz)
+	if err != nil {
+		panic(err)
+	}
+	if err := gz.Close(); err != nil {
+		panic(err)
+	}
+	RepLogData = bytes.NewReader(data)
+}
+
+func BenchmarkDecode(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		RepLogData.Seek(0, 0)
+		if _, err := DecodeEntries(RepLogData); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
 
 func BenchmarkWalk(b *testing.B) {
 	const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs"
