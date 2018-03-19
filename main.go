@@ -25,6 +25,7 @@ const (
 	INFO
 	ERROR
 	FATAL
+	// TODO: Add INVALID
 )
 
 var logLevelStr = [...]string{
@@ -39,7 +40,7 @@ var logLevelStr = [...]string{
 	"FATAL",
 }
 
-func (l LogLevel) valid() bool { return 0 <= l && l <= FATAL }
+func (l LogLevel) valid() bool { return DEBUG <= l && l <= FATAL }
 
 func (l LogLevel) String() string {
 	if l.valid() {
@@ -63,14 +64,14 @@ func (l *LogLevel) UnmarshalJSON(data []byte) error {
 	if string(data) == "null" {
 		return nil
 	}
-	data = unquote(data)
+	data = unquoteNoEscape(data)
 	if len(data) == 1 {
 		n := LogLevel(data[0] - '0')
-		if DEBUG <= n && n <= FATAL {
+		if n.valid() {
 			*l = n
 			return nil
 		}
-		*l = 0
+		*l = DEBUG
 		return errors.New(`invalid LogLevel: "` + string(data) + `"`)
 	}
 	switch string(data) {
@@ -83,10 +84,27 @@ func (l *LogLevel) UnmarshalJSON(data []byte) error {
 	case "fatal":
 		*l = FATAL
 	default:
-		*l = 0
+		*l = DEBUG
 		return errors.New(`invalid LogLevel: "` + string(data) + `"`)
 	}
 	return nil
+}
+
+type CombinedFormat struct {
+	Timestamp Timestamp                  `json:"timestamp"`
+	Source    string                     `json:"source"`
+	Message   string                     `json:"message"`
+	LevelV1   LogLevel                   `json:"log_level"`
+	LevelV2   LogLevel                   `json:"level"`
+	Data      map[string]json.RawMessage `json:"data,omitempty"` // lazily parsed
+	Error     error                      `json:"-"`
+}
+
+func (c *CombinedFormat) LogLevel() LogLevel {
+	if c.LevelV1 > c.LevelV2 {
+		return c.LevelV1
+	}
+	return c.LevelV2
 }
 
 type LogEntry struct {
@@ -107,47 +125,54 @@ type Entry struct {
 
 func (e *Entry) Lager() bool { return e.Log != nil }
 
-func ParseEntry(b []byte) (e Entry) {
-	if !maybeJSON(b) {
-		e.Raw = make([]byte, len(b))
-		copy(e.Raw, b)
-		return
+func extractStringValue(m map[string]json.RawMessage, key string) string {
+	var s string
+	b, ok := m[key]
+	if ok {
+		delete(m, key)
+		if len(b) > 2 {
+			if ub, ok := unquoteBytes(b); ok && len(ub) != 0 {
+				s = string(ub)
+			}
+		}
 	}
+	return s
+}
 
+func ParseLogEntry(b []byte) (*LogEntry, error) {
 	var log CombinedFormat
 	if err := json.Unmarshal(b, &log); err != nil {
-		e.Raw = make([]byte, len(b))
-		copy(e.Raw, b)
-		return
+		return nil, err
 	}
 
-	e.Log = &LogEntry{
+	ent := &LogEntry{
 		Timestamp: log.Timestamp.Time(),
-		LogLevel:  log.LogLevel,
+		LogLevel:  log.LogLevel(),
 		Source:    log.Source,
 		Message:   log.Message,
-		Data:      log.Data,
+		Session:   extractStringValue(log.Data, "session"),
+		Trace:     extractStringValue(log.Data, "trace"),
+		Error:     extractStringValue(log.Data, "error"),
 	}
-
-	// parse only what we need from Data
-	switch {
-	case log.LogLevel == ERROR || log.LogLevel == FATAL:
-		var data ErrorData
-		if err := json.Unmarshal(e.Log.Data, &data); err == nil {
-			e.Log.Session = data.Session
-			e.Log.Trace = data.Trace
-			e.Log.Error = data.Error
+	if len(log.Data) != 0 {
+		b, err := json.Marshal(log.Data)
+		if err != nil {
+			return nil, err
 		}
-	case bytes.Contains(log.Data, []byte(`"session"`)):
-		var data SessionData
-		if err := json.Unmarshal(e.Log.Data, &data); err == nil {
-			e.Log.Session = data.Session
+		ent.Data = b
+	}
+	return ent, nil
+}
+
+func ParseEntry(b []byte) Entry {
+	if maybeJSON(b) {
+		if log, err := ParseLogEntry(b); err == nil {
+			return Entry{Log: log}
 		}
 	}
-	// TODO: remove 'session', 'error' and 'trace' fields (especially trace)
-	// TODO: nil data if empty
-
-	return
+	raw := make([]byte, len(b))
+	copy(raw, b)
+	return Entry{Raw: raw}
 }
 
 var readerPool sync.Pool
@@ -222,6 +247,54 @@ func DecodeEntries(rd io.Reader) ([]Entry, error) {
 	return ents, nil
 }
 
+func DecodeEntriesFast(rd io.Reader) ([]Entry, error) {
+	lines := make(chan []byte, 8)
+	out := make(chan Entry, 8)
+	wg := new(sync.WaitGroup)
+	for i := 0; i < runtime.NumCPU()-1; i++ {
+		wg.Add(1)
+		go func(in chan []byte, out chan Entry, wg *sync.WaitGroup) {
+			defer wg.Done()
+			for b := range in {
+				out <- ParseEntry(b)
+			}
+		}(lines, out, wg)
+	}
+
+	go func() {
+		r := newReader(rd)
+		defer readerPool.Put(r)
+		var err error
+		var buf []byte
+		for err == nil {
+			buf, err = r.ReadLine()
+			// trim trailing newline
+			if len(buf) >= 1 && buf[len(buf)-1] == '\n' {
+				buf = buf[:len(buf)-1]
+			}
+			if len(buf) != 0 {
+				// TODO: use a buffer pool
+				b := make([]byte, len(buf))
+				copy(b, buf)
+				lines <- b
+			}
+		}
+		if err != io.EOF {
+			Fatal(err) // WARN
+		}
+		close(lines)
+		wg.Wait()
+		close(out)
+	}()
+
+	var ents []Entry
+	for e := range out {
+		ents = append(ents, e)
+	}
+
+	return ents, nil
+}
+
 type Data map[string]interface{}
 
 // ErrorData is a reduced set of the fields typically stored in Data when
@@ -275,7 +348,7 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 	if string(data) == "null" {
 		return nil
 	}
-	data = unquote(data)
+	data = unquoteNoEscape(data)
 	if tt, ok := parseUnixTimestamp(data); ok {
 		*t = Timestamp(tt)
 		return nil
@@ -284,113 +357,6 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 	*t = Timestamp(tt)
 	return err
 }
-
-// unquote, returns the unquoted form of JSON value b
-func unquote(b []byte) []byte {
-	if len(b) >= 2 && b[0] == '"' && b[len(b)-1] == '"' {
-		return b[1 : len(b)-1]
-	}
-	return b
-}
-
-type CombinedFormat struct {
-	Timestamp Timestamp `json:"timestamp"`
-	Source    string    `json:"source"`
-	Message   string    `json:"message"`
-	// WARN: This does not work for LogFormatV2
-	LogLevel LogLevel        `json:"log_level"`
-	Data     json.RawMessage `json:"data"` // lazily parsed
-	Error    error           `json:"-"`
-}
-
-// func (c *CombinedFormat) UnmarshalJSON(data []byte) error {
-// 	type InternalFormat struct {
-// 		Timestamp Timestamp       `json:"timestamp"`
-// 		Source    string          `json:"source"`
-// 		Message   string          `json:"message"`
-// 		Level     LogLevel        `json:"level"`
-// 		LogLevel  LogLevel        `json:"log_level"`
-// 		Data      json.RawMessage `json:"data"` // lazily parsed
-// 		Error     error           `json:"-"`
-// 	}
-// 	var x InternalFormat
-// 	if err := json.Unmarshal(data, &x); err != nil {
-// 		return err
-// 	}
-// 	c.Timestamp = x.Timestamp
-// 	c.Source = x.Source
-// 	c.Message = x.Message
-// 	c.Data = x.Data
-// 	c.Error = x.Error
-// 	if x.Level > x.LogLevel {
-// 		c.LogLevel = x.Level
-// 	} else {
-// 		c.LogLevel = x.LogLevel
-// 	}
-// 	return nil
-// }
-
-func ParseFile(name string) ([]CombinedFormat, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var logs []CombinedFormat
-	dec := json.NewDecoder(f)
-	for {
-		var log CombinedFormat
-		err := dec.Decode(&log)
-		if err != nil {
-			if err == io.EOF {
-				break // WARN: is the last log populated??
-			}
-			return nil, err
-		}
-		logs = append(logs, log)
-	}
-	return logs, nil
-}
-
-// type WalkFunc func(path string, info os.FileInfo, err error) error
-/*
-func Walk(root string) {
-	// TODO: check if root is a file
-
-	var (
-		CountTotal int64
-		CountErr   int64
-		CountOk    int64
-	)
-
-	var wg sync.WaitGroup
-	gate := make(chan struct{}, runtime.NumCPU()-1)
-	filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
-		if !fi.Mode().IsRegular() || !strings.HasSuffix(fi.Name(), ".log") {
-			return nil
-		}
-		wg.Add(1)
-		go func(path string) {
-			gate <- struct{}{}
-			defer func() { <-gate; wg.Done() }()
-			atomic.AddInt64(&CountTotal, 1)
-			_, err := ParseFile(path)
-			if err != nil {
-				base := strings.TrimLeft(strings.TrimPrefix(path, root), "/")
-				fmt.Fprintf(os.Stderr, "%s: %s\n", base, err)
-				atomic.AddInt64(&CountErr, 1)
-			} else {
-				atomic.AddInt64(&CountOk, 1)
-			}
-		}(path)
-		return nil
-	})
-
-	fmt.Println("CountTotal:", CountTotal)
-	fmt.Println("CountErr:", CountErr)
-	fmt.Println("CountOk:", CountOk)
-}
-*/
 
 type Walker struct {
 	ents []Entry
@@ -680,16 +646,6 @@ func Fatal(err interface{}) {
 }
 
 // helpers
-
-func extractStringValue(m map[string]interface{}, key string) string {
-	if v := m[key]; v != nil {
-		if s, ok := v.(string); ok {
-			delete(m, key)
-			return s
-		}
-	}
-	return ""
-}
 
 func maybeJSON(b []byte) bool {
 	for _, c := range b {

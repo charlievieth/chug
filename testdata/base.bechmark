@@ -1,0 +1,6 @@
+goos: darwin
+goarch: amd64
+pkg: github.com/charlievieth/chug
+BenchmarkDecode-8   	       2	 561634163 ns/op	97416500 B/op	 1775570 allocs/op
+PASS
+ok  	github.com/charlievieth/chug	1.806s
