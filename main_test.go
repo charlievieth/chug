@@ -5,10 +5,12 @@ import (
 	"compress/gzip"
 	"io/ioutil"
 	"os"
+	"sync"
 	"testing"
 )
 
-var RepLogData *bytes.Reader
+var RepLogReader *bytes.Reader
+var RepLogData []byte
 
 func init() {
 	f, err := os.Open("testdata/rep.out.log.gz")
@@ -20,20 +22,20 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-	data, err := ioutil.ReadAll(gz)
+	RepLogData, err = ioutil.ReadAll(gz)
 	if err != nil {
 		panic(err)
 	}
 	if err := gz.Close(); err != nil {
 		panic(err)
 	}
-	RepLogData = bytes.NewReader(data)
+	RepLogReader = bytes.NewReader(RepLogData)
 }
 
 func BenchmarkDecode(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		RepLogData.Seek(0, 0)
-		if _, err := DecodeEntries(RepLogData); err != nil {
+		RepLogReader.Seek(0, 0)
+		if _, err := DecodeEntries(RepLogReader); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -41,8 +43,8 @@ func BenchmarkDecode(b *testing.B) {
 
 func BenchmarkDecodeFast(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		RepLogData.Seek(0, 0)
-		if _, err := DecodeEntriesFast(RepLogData); err != nil {
+		RepLogReader.Seek(0, 0)
+		if _, err := DecodeEntriesFast(RepLogReader); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -62,6 +64,53 @@ func BenchmarkLogLevelUnmarshalJSON(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		if err := ll.UnmarshalJSON(data); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+type nopWriter struct{}
+
+func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
+
+var LogEntries []Entry
+var initLogEntriesOnce sync.Once
+
+func BenchmarkPrint(b *testing.B) {
+	initLogEntriesOnce.Do(func() {
+		RepLogReader.Seek(0, 0)
+		ents, err := DecodeEntries(RepLogReader)
+		if err != nil {
+			b.Fatal(err)
+		}
+		LogEntries = ents
+	})
+	p := Printer{w: nopWriter{}}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, e := range LogEntries {
+			if err := p.Pretty(e.Log); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+func BenchmarkPrintX(b *testing.B) {
+	initLogEntriesOnce.Do(func() {
+		RepLogReader.Seek(0, 0)
+		ents, err := DecodeEntries(RepLogReader)
+		if err != nil {
+			b.Fatal(err)
+		}
+		LogEntries = ents
+	})
+	p := xprinter{w: nopWriter{}}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for _, e := range LogEntries {
+			if err := p.Pretty(e.Log); err != nil {
+				b.Fatal(err)
+			}
 		}
 	}
 }
