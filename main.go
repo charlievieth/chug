@@ -580,9 +580,11 @@ type xprinter struct {
 	padding [32]byte // padding
 }
 
-func (p *xprinter) reset()           { p.buf = p.buf[0:0] }
-func (p *xprinter) writeByte(c byte) { p.buf = append(p.buf, c) }
-func (p *xprinter) clear()           { p.buf = append(p.buf, color.StyleDefault...) }
+func (p *xprinter) reset()               { p.buf = p.buf[0:0] }
+func (p *xprinter) writeByte(c byte)     { p.buf = append(p.buf, c) }
+func (p *xprinter) write(b []byte)       { p.buf = append(p.buf, b...) }
+func (p *xprinter) writeString(s string) { p.buf = append(p.buf, s...) }
+func (p *xprinter) clear()               { p.buf = append(p.buf, color.StyleDefault...) }
 
 func (p *xprinter) initPad(n int) {
 	// if len(p.padding) < n {
@@ -605,12 +607,12 @@ func (p *xprinter) pad(n int) {
 		// if len(p.padding) < n {
 		p.initPad(n)
 	}
-	p.buf = append(p.buf, p.padding[:n]...)
+	p.write(p.padding[:n])
 }
 
 func (p *xprinter) padStringColor(pad int, code, str string) {
-	p.buf = append(p.buf, code...)
-	p.buf = append(p.buf, str...)
+	p.writeString(code)
+	p.writeString(str)
 	width := pad - utf8.RuneCountInString(str)
 	if width > 0 {
 		p.pad(width)
@@ -619,8 +621,8 @@ func (p *xprinter) padStringColor(pad int, code, str string) {
 }
 
 func (p *xprinter) stringColor(code, str string) {
-	p.buf = append(p.buf, code...)
-	p.buf = append(p.buf, str...)
+	p.writeString(code)
+	p.writeString(str)
 	p.clear()
 }
 
@@ -631,12 +633,12 @@ func (p *xprinter) indentBytes(pad int, s []byte) {
 			break
 		}
 		p.pad(pad)
-		p.buf = append(p.buf, s[:n+1]...) // include newline
+		p.write(s[:n+1]) // include newline
 		s = s[n+1:]
 	}
 	p.pad(pad)
-	p.buf = append(p.buf, s...) // WARN: make sure this is right
-	p.buf = append(p.buf, '\n')
+	p.write(s) // WARN: make sure this is right
+	p.writeByte('\n')
 }
 
 func (p *xprinter) indentString(pad int, s string) {
@@ -650,12 +652,12 @@ func (p *xprinter) indentString(pad int, s string) {
 		s = s[n+1:]
 	}
 	p.pad(pad)
-	p.buf = append(p.buf, s...) // WARN: make sure this is right
-	p.buf = append(p.buf, '\n')
+	p.writeString(s) // WARN: make sure this is right
+	p.writeByte('\n')
 }
 
 func (p *xprinter) indentStringColor(pad int, code, s string) {
-	p.buf = append(p.buf, code...)
+	p.writeString(code)
 	p.indentString(pad, s)
 	p.clear()
 }
@@ -698,7 +700,7 @@ func formatNano(b []byte, nanosec uint) []byte {
 }
 
 func (p *xprinter) formatDateColor(code string, t time.Time) {
-	p.buf = append(p.buf, code...)
+	p.writeString(code)
 
 	_, month, day := t.Date()
 	p.writeDigit(int(month))
