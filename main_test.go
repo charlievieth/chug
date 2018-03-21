@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+	"time"
 )
 
 var RepLogReader *bytes.Reader
@@ -75,6 +76,7 @@ func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 var LogEntries []Entry
 var initLogEntriesOnce sync.Once
 
+// TODO: delete this test!
 func BenchmarkPrint(b *testing.B) {
 	initLogEntriesOnce.Do(func() {
 		RepLogReader.Seek(0, 0)
@@ -88,29 +90,25 @@ func BenchmarkPrint(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		for _, e := range LogEntries {
-			if err := p.Pretty(e.Log); err != nil {
+			if err := p.EncodePretty(e.Log); err != nil {
 				b.Fatal(err)
 			}
 		}
 	}
 }
 
-func BenchmarkPrintX(b *testing.B) {
-	initLogEntriesOnce.Do(func() {
-		RepLogReader.Seek(0, 0)
-		ents, err := DecodeEntries(RepLogReader)
-		if err != nil {
-			b.Fatal(err)
-		}
-		LogEntries = ents
-	})
-	p := xprinter{w: nopWriter{}}
+func BenchmarkEncodePretty(b *testing.B) {
+	log := &LogEntry{
+		Timestamp: time.Date(2018, 05, 10, 13, 01, 02, 03, time.UTC),
+		LogLevel:  INFO,
+		Source:    "rep",
+		Message:   "rep.running-bulker.sync.batch-operations.executing-container-operation.starting",
+		Session:   "14.2865.1.44",
+		Data:      []byte(`{"container-guid": "278d8c4b-3929-455c-4278-42e9"}`),
+	}
+	p := Printer{w: nopWriter{}}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		for _, e := range LogEntries {
-			if err := p.Pretty(e.Log); err != nil {
-				b.Fatal(err)
-			}
-		}
+		p.EncodePretty(log)
 	}
 }

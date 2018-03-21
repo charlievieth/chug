@@ -10,6 +10,3 @@ const (
 	ColorGray      = "\x1b[90m"
 	ColorLightGray = "\x1b[37m"
 )
-
-type Writer struct {
-}

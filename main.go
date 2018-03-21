@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,13 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
-
-	"github.com/charlievieth/chug/color"
 )
 
 type LogLevel int
@@ -213,7 +208,10 @@ func (r *Reader) ReadLine() ([]byte, error) {
 		}
 		r.buf = append(r.buf, frag...)
 	}
-	r.buf = append(r.buf, frag...)
+	// do not include newline
+	if len(frag) > 1 {
+		r.buf = append(r.buf, frag[:len(frag)-1]...)
+	}
 	return r.buf, err
 }
 
@@ -229,23 +227,21 @@ func DecodeEntriesFile(name string) ([]Entry, error) {
 func DecodeEntries(rd io.Reader) ([]Entry, error) {
 	r := newReader(rd)
 	defer readerPool.Put(r)
-	var ents []Entry
 	var err error
-	var buf []byte
-	for err == nil {
-		buf, err = r.ReadLine()
-		// trim trailing newline
-		if len(buf) >= 1 && buf[len(buf)-1] == '\n' {
-			buf = buf[:len(buf)-1]
+	var ents []Entry
+	for {
+		b, e := r.ReadLine()
+		if len(b) != 0 {
+			ents = append(ents, ParseEntry(b))
 		}
-		if len(buf) != 0 {
-			ents = append(ents, ParseEntry(buf))
+		if e != nil {
+			if e != io.EOF {
+				err = e
+			}
+			break
 		}
 	}
-	if err != io.EOF {
-		return nil, err
-	}
-	return ents, nil
+	return ents, err
 }
 
 func DecodeEntriesFast(rd io.Reader) ([]Entry, error) {
@@ -421,352 +417,16 @@ func Walk(root string) []Entry {
 	return all
 }
 
-type Printer struct {
-	w   io.Writer
-	buf bytes.Buffer
-}
-
-func SourceColor(source string) string {
-	n := strings.IndexByte(source, ':')
-	if n != -1 {
-		source = source[:n]
-	}
-	switch source {
-	case "auctioneer":
-		return "\x1b[95m"
-	case "bbs":
-		return "\x1b[36m"
-	case "converger":
-		return "\x1b[94m"
-	case "executor":
-		return "\x1b[92m"
-	case "file-server":
-		return "\x1b[34m"
-	case "garden-linux":
-		return "\x1b[35m"
-	case "loggregator":
-		return "\x1b[33m"
-	case "nsync-listener":
-		return "\x1b[98m"
-	case "rep":
-		return "\x1b[93m"
-	case "route-emitter":
-		return "\x1b[96m"
-	case "router":
-		return "\x1b[32m"
-	case "tps":
-		return "\x1b[97m"
-	default:
-		return "\x1b[0m"
-	}
-}
-
-func (p *Printer) reset() { p.buf.Reset() }
-
-func (p *Printer) padString(pad int, s string) {
-	p.buf.WriteString(s)
-	width := pad - utf8.RuneCountInString(s)
-	if width > 0 {
-		for i := 0; i < width; i++ {
-			p.buf.WriteByte(' ')
-		}
-	}
-}
-
-func (p *Printer) padStringColor(pad int, code, str string) {
-	p.buf.WriteString(code)
-	p.buf.WriteString(str)
-	width := pad - utf8.RuneCountInString(str)
-	if width > 0 {
-		for i := 0; i < width; i++ {
-			p.buf.WriteByte(' ')
-		}
-	}
-	p.buf.WriteString(color.StyleDefault)
-}
-
-func (p *Printer) stringColor(code, str string) {
-	p.buf.WriteString(code)
-	p.buf.WriteString(str)
-	p.buf.WriteString(color.StyleDefault)
-}
-
-func (p *Printer) indentBytes(pad int, s []byte) {
-	padding := make([]byte, pad) // TODO: this is wasteful - fix
-	for i := range padding {
-		padding[i] = ' '
-	}
-	for {
-		n := bytes.IndexByte(s, '\n')
-		if n < 0 {
-			break
-		}
-		p.buf.Write(padding)
-		p.buf.Write(s[:n+1]) // include newline
-		s = s[n+1:]
-	}
-	p.buf.Write(padding)
-	p.buf.Write(s) // WARN: make sure this is right
-	p.buf.WriteByte('\n')
-}
-
-func (p *Printer) indentString(pad int, s string) {
-	padding := make([]byte, pad) // TODO: this is wasteful - fix
-	for i := range padding {
-		padding[i] = ' '
-	}
-	for {
-		n := strings.IndexByte(s, '\n')
-		if n < 0 {
-			break
-		}
-		p.buf.Write(padding)
-		p.buf.WriteString(s[:n+1]) // include newline
-		s = s[n+1:]
-	}
-	p.buf.Write(padding)
-	p.buf.WriteString(s) // WARN: make sure this is right
-	p.buf.WriteByte('\n')
-}
-
-func (p *Printer) indentStringColor(pad int, code, s string) {
-	p.buf.WriteString(code)
-	p.indentString(pad, s)
-	p.buf.WriteString(color.StyleDefault)
-}
-
-func (p *Printer) Pretty(log *LogEntry) error {
-	p.reset()
-	code := SourceColor(log.Source)
-	p.padStringColor(16, code, log.Source)
-	p.buf.WriteByte(' ')
-	switch log.LogLevel {
-	case DEBUG:
-		p.padStringColor(7, color.ColorGray, "[DEBUG]")
-	case INFO:
-		p.padStringColor(7, code, "[INFO]")
-	case ERROR:
-		p.padStringColor(7, color.ColorRed, "[ERROR]")
-	case FATAL:
-		p.padStringColor(7, color.ColorRed, "[FATAL]")
-	}
-	p.buf.WriteByte(' ')
-	p.stringColor(code, log.Timestamp.Format("01/02 15:04:05.00"))
-	p.buf.WriteByte(' ')
-	p.padStringColor(10, color.ColorGray, log.Session)
-	p.buf.WriteByte(' ')
-	p.stringColor(code, log.Message)
-	p.buf.WriteByte('\n')
-
-	if log.Error != "" {
-		p.indentStringColor(27, color.ColorRed, log.Error)
-	}
-	if log.Trace != "" {
-		p.indentStringColor(27, color.ColorRed, log.Trace)
-	}
-	// TODO: strip 'session', 'error' and 'trace'
-	if len(log.Data) != 0 {
-		p.indentBytes(27, log.Data)
-	}
-
-	_, err := p.buf.WriteTo(p.w)
-	return err
-}
-
-type xprinter struct {
-	w   io.Writer
-	buf []byte
-	// padding []byte // padding
-	padding [32]byte // padding
-}
-
-func (p *xprinter) reset()               { p.buf = p.buf[0:0] }
-func (p *xprinter) writeByte(c byte)     { p.buf = append(p.buf, c) }
-func (p *xprinter) write(b []byte)       { p.buf = append(p.buf, b...) }
-func (p *xprinter) writeString(s string) { p.buf = append(p.buf, s...) }
-func (p *xprinter) clear()               { p.buf = append(p.buf, color.StyleDefault...) }
-
-func (p *xprinter) initPad(n int) {
-	// if len(p.padding) < n {
-	if p.padding[0] == 0 {
-		// if n < 32 {
-		// 	n = 32
-		// }
-		// p.padding = make([]byte, n)
-		for i := 0; i < len(p.padding); i++ {
-			p.padding[i] = ' '
-		}
-	}
-}
-
-func (p *xprinter) pad(n int) {
-	if n > len(p.padding) {
-		panic("WTF")
-	}
-	if p.padding[0] == 0 {
-		// if len(p.padding) < n {
-		p.initPad(n)
-	}
-	p.write(p.padding[:n])
-}
-
-func (p *xprinter) padStringColor(pad int, code, str string) {
-	p.writeString(code)
-	p.writeString(str)
-	width := pad - utf8.RuneCountInString(str)
-	if width > 0 {
-		p.pad(width)
-	}
-	p.clear()
-}
-
-func (p *xprinter) stringColor(code, str string) {
-	p.writeString(code)
-	p.writeString(str)
-	p.clear()
-}
-
-func (p *xprinter) indentBytes(pad int, s []byte) {
-	for {
-		n := bytes.IndexByte(s, '\n')
-		if n < 0 {
-			break
-		}
-		p.pad(pad)
-		p.write(s[:n+1]) // include newline
-		s = s[n+1:]
-	}
-	p.pad(pad)
-	p.write(s) // WARN: make sure this is right
-	p.writeByte('\n')
-}
-
-func (p *xprinter) indentString(pad int, s string) {
-	for {
-		n := strings.IndexByte(s, '\n')
-		if n < 0 {
-			break
-		}
-		p.pad(pad)
-		p.buf = append(p.buf, s[:n+1]...) // include newline
-		s = s[n+1:]
-	}
-	p.pad(pad)
-	p.writeString(s) // WARN: make sure this is right
-	p.writeByte('\n')
-}
-
-func (p *xprinter) indentStringColor(pad int, code, s string) {
-	p.writeString(code)
-	p.indentString(pad, s)
-	p.clear()
-}
-
-func (p *xprinter) WriteTo(w io.Writer) (n int64, err error) {
-	if nBytes := len(p.buf); nBytes > 0 {
-		m, e := w.Write(p.buf)
-		if m > nBytes {
-			panic("xprinter.WriteTo: invalid Write count")
-		}
-		p.reset() // reset printer
-		n := int64(m)
-		if e != nil {
-			return n, e
-		}
-		if m != nBytes {
-			return n, io.ErrShortWrite
-		}
-	}
-	return n, nil
-}
-
-func (p *xprinter) writeDigit(n int) {
-	if n < 10 {
-		p.writeByte('0')
-	}
-	p.buf = strconv.AppendInt(p.buf, int64(n), 10)
-}
-
-func formatNano(b []byte, nanosec uint) []byte {
-	u := nanosec
-	var buf [9]byte
-	for start := len(buf); start > 0; {
-		start--
-		buf[start] = byte(u%10 + '0')
-		u /= 10
-	}
-	b = append(b, '.')
-	return append(b, buf[:2]...)
-}
-
-func (p *xprinter) formatDateColor(code string, t time.Time) {
-	p.writeString(code)
-
-	_, month, day := t.Date()
-	p.writeDigit(int(month))
-	p.writeByte('/')
-	p.writeDigit(int(day))
-	p.writeByte(' ')
-
-	p.writeDigit(t.Hour())
-	p.writeByte(':')
-	p.writeDigit(t.Minute())
-	p.writeByte(':')
-	p.writeDigit(t.Second())
-	p.buf = formatNano(p.buf, uint(t.Nanosecond()))
-
-	p.clear()
-}
-
-func (p *xprinter) Pretty(log *LogEntry) error {
-	p.reset()
-	code := SourceColor(log.Source)
-	p.padStringColor(16, code, log.Source)
-	p.writeByte(' ')
-	switch log.LogLevel {
-	case DEBUG:
-		p.padStringColor(7, color.ColorGray, "[DEBUG]")
-	case INFO:
-		p.padStringColor(7, code, "[INFO]")
-	case ERROR:
-		p.padStringColor(7, color.ColorRed, "[ERROR]")
-	case FATAL:
-		p.padStringColor(7, color.ColorRed, "[FATAL]")
-	}
-	p.writeByte(' ')
-	// p.stringColor(code, log.Timestamp.Format("01/02 15:04:05.00"))
-	p.formatDateColor(code, log.Timestamp)
-	p.writeByte(' ')
-	p.padStringColor(10, color.ColorGray, log.Session)
-	p.writeByte(' ')
-	p.stringColor(code, log.Message)
-	p.writeByte('\n')
-
-	if log.Error != "" {
-		p.indentStringColor(27, color.ColorRed, log.Error)
-	}
-	if log.Trace != "" {
-		p.indentStringColor(27, color.ColorRed, log.Trace)
-	}
-	// TODO: strip 'session', 'error' and 'trace'
-	if len(log.Data) != 0 {
-		p.indentBytes(27, log.Data)
-	}
-
-	_, err := p.WriteTo(p.w)
-	return err
-}
-
 func main() {
 
 	if len(os.Args) != 2 {
 		Fatal("USAGE: PATH")
 	}
 	// p := Printer{w: os.Stdout}
-	p := xprinter{w: os.Stdout}
+	p := Printer{w: os.Stdout}
 	ents := Walk(os.Args[1])
 	for _, e := range ents {
-		if err := p.Pretty(e.Log); err != nil {
+		if err := p.EncodePretty(e.Log); err != nil {
 			Fatal(err)
 		}
 	}
