@@ -174,14 +174,16 @@ func (w *walker) onDirEnt(dirName, baseName string, typ os.FileMode) error {
 	return err
 }
 
-func (w *walker) onTarEnt(dirName, entName string, r io.Reader) error {
-	if extArchive(entName) {
+func (w *walker) onTarEnt(dirName string, hdr *tar.Header, tr *tar.Reader) error {
+	// TODO (CEV): maybe some of this logic should live in readArchive ???
+	if extArchive(hdr.Name) {
 		buf := newBuffer()
-		if _, err := buf.ReadFrom(r); err != nil {
+		buf.Grow(int(hdr.Size) + bytes.MinRead)
+		if _, err := buf.ReadFrom(tr); err != nil {
 			bufferPool.Put(buf)
 			return err
 		}
-		if extGzip(entName) {
+		if extGzip(hdr.Name) {
 			gz, err := gzip.NewReader(buf)
 			if err != nil {
 				bufferPool.Put(buf)
@@ -197,12 +199,12 @@ func (w *walker) onTarEnt(dirName, entName string, r io.Reader) error {
 		return nil
 	}
 	// CEV: do we want to check if we care about the file first?
-	return w.fn(entName, 0, ioutil.NopCloser(r))
+	return w.fn(hdr.Name, 0, ioutil.NopCloser(tr))
 }
 
 func (w *walker) walk(root string, runUserCallback bool, archive io.ReadCloser) error {
 	if archive != nil {
-		return readArchive(root, archive, w.onTarEnt)
+		return w.readArchive(root, archive)
 	}
 	if runUserCallback {
 		err := w.fn(root, os.ModeDir, nil)
@@ -216,8 +218,7 @@ func (w *walker) walk(root string, runUserCallback bool, archive io.ReadCloser) 
 	return readDir(root, w.onDirEnt)
 }
 
-func readArchive(dirName string, rc io.ReadCloser, fn func(dirName, entName string, r io.Reader) error) error {
-	defer rc.Close()
+func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
 	var err error
 	tr := tar.NewReader(rc)
 	for {
@@ -231,13 +232,18 @@ func readArchive(dirName string, rc io.ReadCloser, fn func(dirName, entName stri
 		if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
 			continue
 		}
-		if err = fn(dirName, hdr.Name, tr); err != nil {
+		if err = w.onTarEnt(dirName, hdr, tr); err != nil {
 			break
 		}
+	}
+	if e := rc.Close(); err == nil {
+		err = e
 	}
 	return err
 }
 
+// TODO (CEV): Remove logic for handling files - that should be done elsewhere.
+//
 // readDir calls fn for each directory entry in dirName. It does not descend
 // into directories or follow symlinks. If fn returns a non-nil error, readDir
 // returns with that error immediately.
@@ -305,6 +311,10 @@ func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
 
+////////////////////////////////////////////////////////////////////////////////
+////// TODO WE CAN PROBABLY GET RID OF ALL THIS POOL NONSENSE AT NO COST ///////
+////////////////////////////////////////////////////////////////////////////////
+
 var bufferPool sync.Pool
 
 func newBuffer() *bytes.Buffer {
@@ -358,8 +368,8 @@ func (g gzipReadCloser) Close() error {
 // type WalkFn func(path string, typ os.FileMode, rc io.ReadCloser) error
 
 func main() {
-	const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs.tgz"
-	// const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive"
+	// const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs.tgz"
+	const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive"
 	var count int64
 	var nill int64
 	var errs int64
