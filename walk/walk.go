@@ -1,4 +1,4 @@
-package main
+package walk
 
 import (
 	"archive/tar"
@@ -6,15 +6,12 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sync"
-	"sync/atomic"
-	"time"
 )
 
 // TraverseLink is a sentinel error for Walk, similar to filepath.SkipDir.
@@ -36,7 +33,7 @@ type WalkFn func(path string, typ os.FileMode, rc io.ReadCloser) error
 //   * Walk can follow symlinks if walkFn returns the TraverseLink
 //     sentinel error. It is the walkFn's responsibility to prevent
 //     Walk from going into symlink cycles.
-func Walk(root string, walkFn func(path string, typ os.FileMode, rc io.ReadCloser) error) error {
+func Walk(root string, walkFn WalkFn) error {
 	// TODO(bradfitz): make numWorkers configurable? We used a
 	// minimum of 4 to give the kernel more info about multiple
 	// things we want, in hopes its I/O scheduling can take
@@ -50,7 +47,7 @@ func Walk(root string, walkFn func(path string, typ os.FileMode, rc io.ReadClose
 	return walkN(filepath.Clean(root), walkFn, numWorkers)
 }
 
-func walkN(root string, walkFn func(path string, typ os.FileMode, rc io.ReadCloser) error, numWorkers int) error {
+func walkN(root string, walkFn WalkFn, numWorkers int) error {
 	w := &walker{
 		fn:       walkFn,
 		enqueuec: make(chan walkItem, numWorkers), // buffered for performance
@@ -215,7 +212,7 @@ func (w *walker) walk(root string, runUserCallback bool, archive io.ReadCloser) 
 			return err
 		}
 	}
-	return readDir(root, w.onDirEnt)
+	return w.readDir(root)
 }
 
 func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
@@ -250,7 +247,7 @@ func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
 //
 // As a special case it is permitted for dirName to be a regular file.
 //
-func readDir(dirName string, fn func(dirName, entName string, typ os.FileMode) error) error {
+func (w *walker) readDir(dirName string) error {
 	f, err := os.Open(dirName)
 	if err != nil {
 		return err
@@ -262,14 +259,15 @@ func readDir(dirName string, fn func(dirName, entName string, typ os.FileMode) e
 		f.Close()
 		if e == nil && fi.Mode().IsRegular() {
 			dir := filepath.Dir(dirName)
-			return fn(dir, fi.Name(), fi.Mode()&os.ModeType)
+			return w.onDirEnt(dir, fi.Name(), fi.Mode()&os.ModeType)
+			// return fn(dir, fi.Name(), fi.Mode()&os.ModeType)
 		}
 		return err
 	}
 	f.Close()
 
 	for _, fi := range list {
-		if err := fn(dirName, fi.Name(), fi.Mode()&os.ModeType); err != nil {
+		if err := w.onDirEnt(dirName, fi.Name(), fi.Mode()&os.ModeType); err != nil {
 			return err
 		}
 	}
@@ -310,10 +308,6 @@ func extArchive(name string) bool {
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
-
-////////////////////////////////////////////////////////////////////////////////
-////// TODO WE CAN PROBABLY GET RID OF ALL THIS POOL NONSENSE AT NO COST ///////
-////////////////////////////////////////////////////////////////////////////////
 
 var bufferPool sync.Pool
 
@@ -363,40 +357,6 @@ func (g gzipReadCloser) Read(p []byte) (int, error) {
 func (g gzipReadCloser) Close() error {
 	bufferPool.Put(g.buf)
 	return g.gz.Close()
-}
-
-// type WalkFn func(path string, typ os.FileMode, rc io.ReadCloser) error
-
-func main() {
-	// const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs.tgz"
-	const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive"
-	var count int64
-	var nill int64
-	var errs int64
-	start := time.Now()
-	err := Walk(root, func(path string, typ os.FileMode, rc io.ReadCloser) error {
-		// if path == "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs" {
-		// 	return filepath.SkipDir
-		// }
-		if rc != nil {
-			if _, err := ioutil.ReadAll(rc); err != nil {
-				fmt.Printf("error (%s): %s\n", path, err)
-				atomic.AddInt64(&errs, 1)
-			}
-		} else {
-			atomic.AddInt64(&nill, 1)
-		}
-		atomic.AddInt64(&count, 1)
-		// fmt.Println(path)
-		return nil
-	})
-	d := time.Since(start)
-	fmt.Println("Error:", err)
-	fmt.Println("Count:", count)
-	fmt.Println("Nill:", nill)
-	fmt.Println("Errors:", errs)
-	fmt.Println("Time:", d, d/time.Duration(count))
-	fmt.Println()
 }
 
 /*
