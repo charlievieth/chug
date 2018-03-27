@@ -228,3 +228,38 @@ func SourceColor(source string) string {
 		return "\x1b[0m"
 	}
 }
+
+// TODO: Use random colors for unknown sources
+/*
+var availableColors [256]bool
+
+func init() {
+	// 16 <= i && i <= 231  --  ignore grayscale
+	for i := 16; i <= 231; i++ {
+		availableColors[i] = true
+	}
+	uglyavailableColors := []int{16, 17, 18, 19, 52, 53, 88}
+	for _, i := range uglyavailableColors {
+		availableColors[i] = false
+	}
+}
+
+// "\x1b[38;5;33m"
+var uniqueColorMap struct {
+	sync.Mutex
+	color map[string]string
+}
+
+func init() {
+	panic("DO THIS SHIT!!")
+}
+
+func getColor(source string) string {
+	uniqueColorMap.Lock()
+	defer uniqueColorMap.Unlock()
+	if s, ok := uniqueColorMap.color[source]; ok {
+		return s
+	}
+	return ""
+}
+*/

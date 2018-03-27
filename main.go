@@ -1,164 +1,29 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
+	"sort"
 	"sync"
 	"time"
+
+	"github.com/charlievieth/chug/walk"
 )
-
-type LogLevel int
-
-const (
-	DEBUG = LogLevel(iota)
-	INFO
-	ERROR
-	FATAL
-	// TODO: Add INVALID
-)
-
-var logLevelStr = [...]string{
-	DEBUG: "debug",
-	INFO:  "info",
-	ERROR: "error",
-	FATAL: "fatal",
-	// upper case
-	"DEBUG",
-	"INFO",
-	"ERROR",
-	"FATAL",
-}
-
-func (l LogLevel) valid() bool { return DEBUG <= l && l <= FATAL }
-
-func (l LogLevel) String() string {
-	if l.valid() {
-		return logLevelStr[l]
-	}
-	return "invalid"
-}
-
-func (l LogLevel) Upper() string {
-	if l.valid() {
-		return logLevelStr[l+FATAL+1]
-	}
-	return "INVALID"
-}
-
-func (l LogLevel) MarshalJSON() ([]byte, error) {
-	return []byte(`"` + l.String() + `"`), nil
-}
-
-func (l *LogLevel) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" {
-		return nil
-	}
-	data = unquoteNoEscape(data)
-	if len(data) == 1 {
-		n := LogLevel(data[0] - '0')
-		if n.valid() {
-			*l = n
-			return nil
-		}
-		*l = DEBUG
-		return errors.New(`invalid LogLevel: "` + string(data) + `"`)
-	}
-	switch string(data) {
-	case "debug":
-		*l = DEBUG
-	case "info":
-		*l = INFO
-	case "error":
-		*l = ERROR
-	case "fatal":
-		*l = FATAL
-	default:
-		*l = DEBUG
-		return errors.New(`invalid LogLevel: "` + string(data) + `"`)
-	}
-	return nil
-}
-
-type CombinedFormat struct {
-	Timestamp Timestamp                  `json:"timestamp"`
-	Source    string                     `json:"source"`
-	Message   string                     `json:"message"`
-	LevelV1   LogLevel                   `json:"log_level"`
-	LevelV2   LogLevel                   `json:"level"`
-	Data      map[string]json.RawMessage `json:"data,omitempty"` // lazily parsed
-	Error     error                      `json:"-"`
-}
-
-func (c *CombinedFormat) LogLevel() LogLevel {
-	if c.LevelV1 > c.LevelV2 {
-		return c.LevelV1
-	}
-	return c.LevelV2
-}
-
-type LogEntry struct {
-	Timestamp time.Time
-	LogLevel  LogLevel
-	Source    string
-	Message   string
-	Session   string
-	Error     string
-	Trace     string
-	Data      json.RawMessage // lazily parsed
-}
 
 type Entry struct {
 	Log *LogEntry
 	Raw []byte
 }
 
-func (e *Entry) Lager() bool { return e.Log != nil }
-
-func extractStringValue(m map[string]json.RawMessage, key string) string {
-	var s string
-	b, ok := m[key]
-	if ok {
-		delete(m, key)
-		if len(b) > 2 {
-			if ub, ok := unquoteBytes(b); ok && len(ub) != 0 {
-				s = string(ub)
-			}
-		}
-	}
-	return s
-}
-
-func ParseLogEntry(b []byte) (*LogEntry, error) {
-	var log CombinedFormat
-	if err := json.Unmarshal(b, &log); err != nil {
-		return nil, err
-	}
-
-	ent := &LogEntry{
-		Timestamp: log.Timestamp.Time(),
-		LogLevel:  log.LogLevel(),
-		Source:    log.Source,
-		Message:   log.Message,
-		Session:   extractStringValue(log.Data, "session"),
-		Trace:     extractStringValue(log.Data, "trace"),
-		Error:     extractStringValue(log.Data, "error"),
-	}
-	if len(log.Data) != 0 {
-		b, err := json.Marshal(log.Data)
-		if err != nil {
-			return nil, err
-		}
-		ent.Data = b
-	}
-	return ent, nil
-}
+func (e *Entry) Lager() bool { return e.Log != nil && !e.Log.Timestamp.IsZero() }
 
 func ParseEntry(b []byte) Entry {
 	if maybeJSON(b) {
@@ -171,6 +36,58 @@ func ParseEntry(b []byte) Entry {
 	return Entry{Raw: raw}
 }
 
+type entryByTime []Entry
+
+func (e entryByTime) Len() int      { return len(e) }
+func (e entryByTime) Swap(i, j int) { e[i], e[j] = e[j], e[i] }
+
+func (e entryByTime) Less(i, j int) bool {
+	return e[i].Log != nil && e[j].Log != nil &&
+		e[i].Log.Timestamp.Before(e[j].Log.Timestamp)
+}
+
+var bufferPool sync.Pool
+
+func newBuffer() *bytes.Buffer {
+	if v := bufferPool.Get(); v != nil {
+		b := v.(*bytes.Buffer)
+		b.Reset()
+		return b
+	}
+	return new(bytes.Buffer)
+}
+
+func putBuffer(b *bytes.Buffer) {
+	bufferPool.Put(b)
+}
+
+type bufferReadCloser struct {
+	*bytes.Buffer
+}
+
+func (b bufferReadCloser) Close() error {
+	putBuffer(b.Buffer)
+	return nil
+}
+
+type gzipReadCloser struct {
+	buf *bytes.Buffer
+	gz  *gzip.Reader
+}
+
+func (g gzipReadCloser) Read(p []byte) (int, error) {
+	return g.gz.Read(p)
+}
+
+func (g gzipReadCloser) Close() error {
+	putBuffer(g.buf)
+	return g.gz.Close()
+}
+
+type nopCloser struct{ io.Reader }
+
+func (nopCloser) Close() error { return nil }
+
 var readerPool sync.Pool
 
 func newReader(rd io.Reader) *Reader {
@@ -180,6 +97,11 @@ func newReader(rd io.Reader) *Reader {
 		return r
 	}
 	return &Reader{b: bufio.NewReaderSize(rd, 32*1014)}
+}
+
+func putReader(r *Reader) {
+	r.b.Reset(nil) // Remove reference
+	readerPool.Put(r)
 }
 
 type Reader struct {
@@ -226,7 +148,7 @@ func DecodeEntriesFile(name string) ([]Entry, error) {
 
 func DecodeEntries(rd io.Reader) ([]Entry, error) {
 	r := newReader(rd)
-	defer readerPool.Put(r)
+	defer putReader(r)
 	var err error
 	var ents []Entry
 	for {
@@ -240,6 +162,35 @@ func DecodeEntries(rd io.Reader) ([]Entry, error) {
 			}
 			break
 		}
+	}
+	return ents, err
+}
+
+func DecodeValidEntries(rd io.Reader) ([]Entry, error) {
+	r := newReader(rd)
+	defer putReader(r)
+	var err error
+	var ents []Entry
+	invalid := 0
+	for invalid < 100 {
+		b, e := r.ReadLine()
+		if len(b) != 0 {
+			if ent := ParseEntry(b); ent.Lager() {
+				ent.Raw = nil
+				ents = append(ents, ent)
+			} else {
+				invalid++
+			}
+		}
+		if e != nil {
+			if e != io.EOF {
+				err = e
+			}
+			break
+		}
+	}
+	if len(ents) == 0 || invalid >= 100 {
+		return nil, nil // WARN WARN WARN
 	}
 	return ents, err
 }
@@ -260,7 +211,7 @@ func DecodeEntriesFast(rd io.Reader) ([]Entry, error) {
 
 	go func() {
 		r := newReader(rd)
-		defer readerPool.Put(r)
+		defer putReader(r)
 		var err error
 		var buf []byte
 		for err == nil {
@@ -292,72 +243,210 @@ func DecodeEntriesFast(rd io.Reader) ([]Entry, error) {
 	return ents, nil
 }
 
-type Data map[string]interface{}
+func (w *Walker) Worker() {
 
-// ErrorData is a reduced set of the fields typically stored in Data when
-// there is an error - this is done to conserve memory.
-type ErrorData struct {
-	Session string `json:"session"`
-	Trace   string `json:"trace"`
-	Error   string `json:"error"`
-}
-
-// SessionData is used for extracting only the session field from Data -
-// this is done to conserve memory.
-type SessionData struct {
-	Session string `json:"session"`
-}
-
-type Timestamp time.Time
-
-func (t Timestamp) Time() time.Time              { return time.Time(t) }
-func (t Timestamp) String() string               { return time.Time(t).String() }
-func (t Timestamp) MarshalJSON() ([]byte, error) { return time.Time(t).MarshalJSON() }
-
-func parseUnixTimestamp(b []byte) (time.Time, bool) {
-	// N.B. I was a bored when I wrote this so its a bit over-optimized.
-	var dot bool
-	var nsec int64
-	if len(b) == 0 || !('1' <= b[0] && b[0] <= '9') {
-		goto Error
-	}
-	for _, c := range b {
-		switch {
-		case '0' <= c && c <= '9':
-			nsec = nsec*10 + int64(c-'0')
-		case c == '.' && !dot:
-			dot = true
-		default:
-			goto Error
-		}
-	}
-	if !dot {
-		nsec *= 1e9
-	}
-	return time.Unix(0, nsec), true
-
-Error:
-	return time.Time{}, false
-}
-
-func (t *Timestamp) UnmarshalJSON(data []byte) error {
-	// Ignore null, like in the main JSON package.
-	if string(data) == "null" {
-		return nil
-	}
-	data = unquoteNoEscape(data)
-	if tt, ok := parseUnixTimestamp(data); ok {
-		*t = Timestamp(tt)
-		return nil
-	}
-	tt, err := time.Parse(time.RFC3339, string(data))
-	*t = Timestamp(tt)
-	return err
 }
 
 type Walker struct {
-	ents []Entry
-	mu   sync.Mutex
+	ents   []Entry
+	mu     sync.Mutex
+	stream chan io.ReadCloser
+	wg     sync.WaitGroup
+	errs   chan error
+	gate   chan struct{}
+	halt   chan struct{}
+}
+
+func (w *Walker) report(err error) {
+	to := time.NewTimer(time.Second)
+	select {
+	case w.errs <- err:
+		// ok
+	case <-w.halt:
+		// exit
+	case <-to.C:
+		// timed out sending error
+	}
+	to.Stop()
+}
+
+func (w *Walker) enqueue(rc io.ReadCloser) {
+	select {
+	case w.stream <- rc:
+		// ok
+	case <-w.halt:
+		// exit
+	}
+}
+
+func (w *Walker) doStop() bool {
+	select {
+	case <-w.halt:
+		return true
+	default:
+		return false
+	}
+}
+
+func openFile(name string) (io.ReadCloser, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	var rc io.ReadCloser = f
+	if hasSuffix(name, ".gz") || hasSuffix(name, ".tgz") {
+		gr, err := gzip.NewReader(bufio.NewReaderSize(f, 32*1024))
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		rc = gr
+	}
+	return rc, nil
+}
+
+func (w *Walker) enterGate() { w.gate <- struct{}{} }
+func (w *Walker) exitGate()  { <-w.gate }
+
+func (w *Walker) IncludeFile(name string) bool { return true }
+func (w *Walker) IncludeDir(name string) bool  { return true }
+
+// WARN: RENAME
+func (w *Walker) processTarball(name string, rc io.ReadCloser) error {
+	defer rc.Close()
+	tr := tar.NewReader(rc)
+	for {
+		if w.doStop() {
+			return nil
+		}
+		hdr, err := tr.Next()
+		if err != nil {
+			if err != io.EOF {
+				return err
+			}
+			break
+		}
+		if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
+			continue
+		}
+		if hasSuffix(hdr.Name, ".tar") {
+			child := name + "::" + hdr.Name
+			if err := w.processTarball(child, nopCloser{tr}); err != nil {
+				w.report(err)
+			}
+			continue
+		}
+		if hasSuffix(hdr.Name, ".tgz") || hasSuffix(hdr.Name, ".tar.gz") {
+			gz, err := gzip.NewReader(tr)
+			if err != nil {
+				w.report(err)
+				continue
+			}
+			child := name + "::" + hdr.Name
+			if err := w.processTarball(child, gz); err != nil {
+				w.report(err)
+			}
+			continue
+		}
+		// TODO: do we also wan't to check if the files directory
+		// should be skipped.  This might be useless.
+		if !w.IncludeFile(hdr.Name) {
+			continue
+		}
+		// WARN: make sure we don't consume too much memory!!!
+		// Not using a buffered chanel or limiting the size of
+		// the chanel's buffer may help with this.
+		//
+		buf := newBuffer()
+		if _, err := buf.ReadFrom(tr); err != nil {
+			w.report(err)
+			continue
+		}
+		if hasSuffix(hdr.Name, ".gz") {
+			gr, err := gzip.NewReader(buf)
+			if err != nil {
+				w.report(err)
+				continue
+			}
+			w.enqueue(gzipReadCloser{buf: buf, gz: gr})
+		} else {
+			w.enqueue(bufferReadCloser{Buffer: buf})
+		}
+	}
+	return nil
+}
+
+func (w *Walker) ParseTarball(name string) error {
+	if !hasSuffix(name, ".tar") && !hasSuffix(name, ".tar.gz") && !hasSuffix(name, ".tgz") {
+		return fmt.Errorf("Walker.ParseTarball: invalid filename: %s", name)
+	}
+	f, err := os.Open(name)
+	if err != nil {
+		return err
+	}
+	var rc io.ReadCloser = f
+	if hasSuffix(name, ".tgz") || hasSuffix(name, ".tar.gz") {
+		gr, err := gzip.NewReader(f)
+		if err != nil {
+			f.Close()
+			return err
+		}
+		rc = gr
+	}
+	w.wg.Add(1)
+	go func(rc io.ReadCloser) {
+		w.enterGate()
+		defer func() {
+			rc.Close()
+			w.exitGate()
+			w.wg.Done()
+		}()
+		tr := tar.NewReader(rc)
+		for {
+			hdr, err := tr.Next()
+			if err != nil {
+				if err != io.EOF {
+					// WARN: handle
+				}
+				break
+			}
+			if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
+				continue
+			}
+			// TODO: do we also wan't to check if the files directory
+			// should be skipped.  This might be useless.
+			if !w.IncludeFile(hdr.Name) {
+				continue
+			}
+			// TODO: handle nested tarballs
+			if hasSuffix(hdr.Name, ".tgz") || hasSuffix(hdr.Name, ".tar.gz") {
+				continue
+			}
+			// WARN: make sure we don't consume too much memory!!!
+			// Not using a buffered chanel or limiting the size of
+			// the chanel's buffer may help with this.
+			//
+			buf := newBuffer()
+			if _, err := buf.ReadFrom(tr); err != nil {
+				// WARN: handle
+			}
+			if hasSuffix(hdr.Name, ".gz") {
+				gr, err := gzip.NewReader(buf)
+				if err != nil {
+					// WARN: handle
+				}
+				w.stream <- gzipReadCloser{buf: buf, gz: gr}
+			} else {
+				w.stream <- bufferReadCloser{Buffer: buf}
+			}
+		}
+	}(rc)
+	return nil
+}
+
+func (w *Walker) HandleFile(name string) error {
+
+	return nil
 }
 
 func Worker(paths <-chan string, out chan<- []Entry, wg *sync.WaitGroup) {
@@ -399,7 +488,7 @@ func Walk(root string) []Entry {
 	}
 
 	filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
-		if !fi.Mode().IsRegular() || !strings.HasSuffix(fi.Name(), ".log") {
+		if !fi.Mode().IsRegular() || !hasSuffix(fi.Name(), ".log") {
 			return nil
 		}
 		paths <- path
@@ -417,54 +506,210 @@ func Walk(root string) []Entry {
 	return all
 }
 
-func main() {
+type XWalker struct {
+	ents []Entry
+	mu   sync.Mutex
+}
 
+func (x *XWalker) Walk(path string, typ os.FileMode, rc io.ReadCloser) error {
+	if typ.IsDir() {
+		return nil
+	}
+	if !hasSuffix(path, ".log") {
+		ok, err := filepath.Match("*.log.*.gz", filepath.Base(path))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error (match - %s): %s\n", path, err)
+			return nil
+		}
+		if !ok {
+			return nil
+		}
+	}
+	var xrc io.ReadCloser
+	switch {
+	case rc != nil:
+		defer rc.Close()
+		if hasSuffix(path, ".gz") {
+			gz, err := gzip.NewReader(rc)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error (rc - %s): %s\n", path, err)
+				return nil
+			}
+			xrc = gz
+		} else {
+			xrc = rc
+		}
+	case typ.IsRegular():
+		var err error
+		xrc, err = openFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error (file - %s): %s\n", path, err)
+			return nil
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "WTF (path - %s): %s - %#v\n", path, typ, rc)
+		return nil
+	}
+	defer xrc.Close()
+	ents, err := DecodeValidEntries(xrc)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error (decode - %s): %s\n", path, err)
+		return nil
+	}
+	x.mu.Lock()
+	x.ents = append(x.ents, ents...)
+	x.mu.Unlock()
+	return nil
+}
+
+func (x *XWalker) EncodeJSON(filename string) error {
+	f, err := os.OpenFile(filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, e := range x.ents {
+		if e.Log == nil {
+			continue
+		}
+		if err := enc.Encode(e.Log); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ParseJSON(filename string) ([]LogEntry, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	var logs []LogEntry
+	for {
+		var e LogEntry
+		if e := dec.Decode(&e); e != nil {
+			if e != io.EOF {
+				err = e
+			}
+			break
+		}
+		logs = append(logs, e)
+	}
+	return logs, err
+}
+
+func PrintMemstats() {
+	type MemStats struct {
+		Alloc        uint64
+		TotalAlloc   uint64
+		Sys          uint64
+		Lookups      uint64
+		Mallocs      uint64
+		Frees        uint64
+		HeapAlloc    uint64
+		HeapSys      uint64
+		HeapIdle     uint64
+		HeapInuse    uint64
+		HeapReleased uint64
+		HeapObjects  uint64
+		StackInuse   uint64
+		StackSys     uint64
+	}
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	x := MemStats{
+		Alloc:        m.Alloc,
+		TotalAlloc:   m.TotalAlloc,
+		Sys:          m.Sys,
+		Lookups:      m.Lookups,
+		Mallocs:      m.Mallocs,
+		Frees:        m.Frees,
+		HeapAlloc:    m.HeapAlloc,
+		HeapSys:      m.HeapSys,
+		HeapIdle:     m.HeapIdle,
+		HeapInuse:    m.HeapInuse,
+		HeapReleased: m.HeapReleased,
+		HeapObjects:  m.HeapObjects,
+		StackInuse:   m.StackInuse,
+		StackSys:     m.StackSys,
+	}
+	PrintJSON(x)
+}
+
+func main() {
 	if len(os.Args) != 2 {
 		Fatal("USAGE: PATH")
 	}
+	out := bufio.NewWriterSize(os.Stdout, 32*1024)
+	p := NewPrinter(out)
+
+	{
+		start := time.Now()
+		t := start
+		var x XWalker
+		fmt.Fprintln(os.Stderr, "walk start")
+		if err := walk.Walk(os.Args[1], x.Walk); err != nil {
+			Fatal(err)
+		}
+		d := time.Since(t)
+		fmt.Fprintln(os.Stderr, "walk done:", d, d/time.Duration(len(x.ents)))
+
+		fmt.Fprintln(os.Stderr, "sort start")
+		t = time.Now()
+		sort.Sort(entryByTime(x.ents))
+		d = time.Since(t)
+		fmt.Fprintln(os.Stderr, "sort done:", d, d/time.Duration(len(x.ents)))
+
+		{
+			fmt.Fprintln(os.Stderr, "json start")
+			if err := x.EncodeJSON("out.json"); err != nil {
+				Fatal(err)
+			}
+			d = time.Since(start)
+			fmt.Fprintln(os.Stderr, "json done:", d, d/time.Duration(len(x.ents)))
+			return
+		}
+
+		fmt.Fprintln(os.Stderr, "print start")
+		t = time.Now()
+		for _, e := range x.ents {
+			if e.Log == nil {
+				continue // shouldn't happen
+			}
+			if err := p.EncodePretty(e.Log); err != nil {
+				Fatal(err)
+			}
+		}
+		if err := out.Flush(); err != nil {
+			Fatal(err)
+		}
+		d = time.Since(t)
+		total := time.Since(start)
+		fmt.Fprintln(os.Stderr, "print done:", d, d/time.Duration(len(x.ents)))
+		fmt.Fprintln(os.Stderr, "total:", total, total/time.Duration(len(x.ents)))
+		return
+	}
+
 	// p := Printer{w: os.Stdout}
-	p := Printer{w: os.Stdout}
 	ents := Walk(os.Args[1])
 	for _, e := range ents {
 		if err := p.EncodePretty(e.Log); err != nil {
 			Fatal(err)
 		}
 	}
+}
 
-	// enc := json.NewEncoder(os.Stdout)
-	// for _, e := range ents {
-	// 	if err := enc.Encode(e.Log); err != nil {
-	// 		Fatal(err)
-	// 	}
-	// }
-	// fmt.Println("Entries:", len(ents))
+type Config struct {
+	Sort           bool
+	AllLogs        bool
+	FollowSymlinks bool
+}
 
-	// data := []byte(`{"level": "fatal"}`)
-	// var f CombinedFormat
-	// if err := json.Unmarshal(data, &f); err != nil {
-	// 	Fatal(err)
-	// }
-	// fmt.Println(f.LogLevel)
-
-	// b, err := json.Marshal("debug")
-	// if err != nil {
-	// 	Fatal(err)
-	// }
-	// var lv LogLevel
-	// if err := json.Unmarshal(b, &lv); err != nil {
-	// 	Fatal(err)
-	// }
-	// fmt.Println(lv)
-
-	// data := []byte(`{"timestamp": "1520986770.534132957", "time": "2018-03-13T20:19:30-04:00"}`)
-	// var m map[string]Timestamp
-	// if err := json.Unmarshal(data, &m); err != nil {
-	// 	Fatal(err)
-	// }
-	// ts := time.Time(m["timestamp"])
-	// tt := time.Time(m["time"])
-	// fmt.Println(ts)
-	// fmt.Println(tt)
+func (c *Config) Walk(root string) error {
+	return nil
 }
 
 func PrintJSON(v interface{}) error {
@@ -508,14 +753,8 @@ func maybeJSON(b []byte) bool {
 	return false
 }
 
-type logByTime []LogEntry
-
-func (e logByTime) Len() int           { return len(e) }
-func (e logByTime) Less(i, j int) bool { return e[i].Timestamp.Before(e[j].Timestamp) }
-func (e logByTime) Swap(i, j int)      { e[i], e[j] = e[j], e[i] }
-
-type entryByTime []Entry
-
-func (e entryByTime) Len() int           { return len(e) }
-func (e entryByTime) Less(i, j int) bool { return e[i].Log.Timestamp.Before(e[j].Log.Timestamp) }
-func (e entryByTime) Swap(i, j int)      { e[i], e[j] = e[j], e[i] }
+// hasSuffix tests whether the string s ends with suffix.  Same as
+// strings.HasSuffix, but with a shorter name.
+func hasSuffix(s, suffix string) bool {
+	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
+}
