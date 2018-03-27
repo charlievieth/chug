@@ -55,20 +55,12 @@ func BenchmarkDecodeFast(b *testing.B) {
 
 func BenchmarkWalk(b *testing.B) {
 	const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs"
-	// const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs/diego-cell_0ff998a2-1b9e-4182-82f9-f8dbb5f844b6/rep"
 	for i := 0; i < b.N; i++ {
-		Walk(root)
-	}
-}
-
-func BenchmarkWalkWalk(b *testing.B) {
-	const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs"
-	for i := 0; i < b.N; i++ {
-		var x XWalker
-		if err := walk.Walk(root, x.Walk); err != nil {
+		var w Walker
+		if err := walk.Walk(root, w.Walk); err != nil {
 			b.Fatal(err)
 		}
-		x.ents = nil
+		w.ents = nil
 	}
 }
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"archive/tar"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -243,51 +242,6 @@ func DecodeEntriesFast(rd io.Reader) ([]Entry, error) {
 	return ents, nil
 }
 
-func (w *Walker) Worker() {
-
-}
-
-type Walker struct {
-	ents   []Entry
-	mu     sync.Mutex
-	stream chan io.ReadCloser
-	wg     sync.WaitGroup
-	errs   chan error
-	gate   chan struct{}
-	halt   chan struct{}
-}
-
-func (w *Walker) report(err error) {
-	to := time.NewTimer(time.Second)
-	select {
-	case w.errs <- err:
-		// ok
-	case <-w.halt:
-		// exit
-	case <-to.C:
-		// timed out sending error
-	}
-	to.Stop()
-}
-
-func (w *Walker) enqueue(rc io.ReadCloser) {
-	select {
-	case w.stream <- rc:
-		// ok
-	case <-w.halt:
-		// exit
-	}
-}
-
-func (w *Walker) doStop() bool {
-	select {
-	case <-w.halt:
-		return true
-	default:
-		return false
-	}
-}
-
 func openFile(name string) (io.ReadCloser, error) {
 	f, err := os.Open(name)
 	if err != nil {
@@ -305,213 +259,12 @@ func openFile(name string) (io.ReadCloser, error) {
 	return rc, nil
 }
 
-func (w *Walker) enterGate() { w.gate <- struct{}{} }
-func (w *Walker) exitGate()  { <-w.gate }
-
-func (w *Walker) IncludeFile(name string) bool { return true }
-func (w *Walker) IncludeDir(name string) bool  { return true }
-
-// WARN: RENAME
-func (w *Walker) processTarball(name string, rc io.ReadCloser) error {
-	defer rc.Close()
-	tr := tar.NewReader(rc)
-	for {
-		if w.doStop() {
-			return nil
-		}
-		hdr, err := tr.Next()
-		if err != nil {
-			if err != io.EOF {
-				return err
-			}
-			break
-		}
-		if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
-			continue
-		}
-		if hasSuffix(hdr.Name, ".tar") {
-			child := name + "::" + hdr.Name
-			if err := w.processTarball(child, nopCloser{tr}); err != nil {
-				w.report(err)
-			}
-			continue
-		}
-		if hasSuffix(hdr.Name, ".tgz") || hasSuffix(hdr.Name, ".tar.gz") {
-			gz, err := gzip.NewReader(tr)
-			if err != nil {
-				w.report(err)
-				continue
-			}
-			child := name + "::" + hdr.Name
-			if err := w.processTarball(child, gz); err != nil {
-				w.report(err)
-			}
-			continue
-		}
-		// TODO: do we also wan't to check if the files directory
-		// should be skipped.  This might be useless.
-		if !w.IncludeFile(hdr.Name) {
-			continue
-		}
-		// WARN: make sure we don't consume too much memory!!!
-		// Not using a buffered chanel or limiting the size of
-		// the chanel's buffer may help with this.
-		//
-		buf := newBuffer()
-		if _, err := buf.ReadFrom(tr); err != nil {
-			w.report(err)
-			continue
-		}
-		if hasSuffix(hdr.Name, ".gz") {
-			gr, err := gzip.NewReader(buf)
-			if err != nil {
-				w.report(err)
-				continue
-			}
-			w.enqueue(gzipReadCloser{buf: buf, gz: gr})
-		} else {
-			w.enqueue(bufferReadCloser{Buffer: buf})
-		}
-	}
-	return nil
-}
-
-func (w *Walker) ParseTarball(name string) error {
-	if !hasSuffix(name, ".tar") && !hasSuffix(name, ".tar.gz") && !hasSuffix(name, ".tgz") {
-		return fmt.Errorf("Walker.ParseTarball: invalid filename: %s", name)
-	}
-	f, err := os.Open(name)
-	if err != nil {
-		return err
-	}
-	var rc io.ReadCloser = f
-	if hasSuffix(name, ".tgz") || hasSuffix(name, ".tar.gz") {
-		gr, err := gzip.NewReader(f)
-		if err != nil {
-			f.Close()
-			return err
-		}
-		rc = gr
-	}
-	w.wg.Add(1)
-	go func(rc io.ReadCloser) {
-		w.enterGate()
-		defer func() {
-			rc.Close()
-			w.exitGate()
-			w.wg.Done()
-		}()
-		tr := tar.NewReader(rc)
-		for {
-			hdr, err := tr.Next()
-			if err != nil {
-				if err != io.EOF {
-					// WARN: handle
-				}
-				break
-			}
-			if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
-				continue
-			}
-			// TODO: do we also wan't to check if the files directory
-			// should be skipped.  This might be useless.
-			if !w.IncludeFile(hdr.Name) {
-				continue
-			}
-			// TODO: handle nested tarballs
-			if hasSuffix(hdr.Name, ".tgz") || hasSuffix(hdr.Name, ".tar.gz") {
-				continue
-			}
-			// WARN: make sure we don't consume too much memory!!!
-			// Not using a buffered chanel or limiting the size of
-			// the chanel's buffer may help with this.
-			//
-			buf := newBuffer()
-			if _, err := buf.ReadFrom(tr); err != nil {
-				// WARN: handle
-			}
-			if hasSuffix(hdr.Name, ".gz") {
-				gr, err := gzip.NewReader(buf)
-				if err != nil {
-					// WARN: handle
-				}
-				w.stream <- gzipReadCloser{buf: buf, gz: gr}
-			} else {
-				w.stream <- bufferReadCloser{Buffer: buf}
-			}
-		}
-	}(rc)
-	return nil
-}
-
-func (w *Walker) HandleFile(name string) error {
-
-	return nil
-}
-
-func Worker(paths <-chan string, out chan<- []Entry, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for path := range paths {
-		ents, err := DecodeEntriesFile(path)
-		if err != nil {
-			continue
-		}
-		out <- ents
-	}
-}
-
-func Walk(root string) []Entry {
-	// TODO: check if root is a file
-
-	// var (
-	// 	CountTotal int64
-	// 	CountErr   int64
-	// 	CountOk    int64
-	// )
-
-	all := make([]Entry, 0, 256)
-	out := make(chan []Entry)
-	owg := new(sync.WaitGroup)
-	owg.Add(1)
-	go func() {
-		defer owg.Done()
-		for ents := range out {
-			all = append(all, ents...)
-		}
-	}()
-
-	wwg := new(sync.WaitGroup)
-	paths := make(chan string, 8)
-	for i := 0; i < runtime.NumCPU()-1; i++ {
-		wwg.Add(1)
-		go Worker(paths, out, wwg)
-	}
-
-	filepath.Walk(root, func(path string, fi os.FileInfo, err error) error {
-		if !fi.Mode().IsRegular() || !hasSuffix(fi.Name(), ".log") {
-			return nil
-		}
-		paths <- path
-		return nil
-	})
-	close(paths)
-	wwg.Wait()
-	close(out)
-	owg.Wait()
-
-	// fmt.Println("CountTotal:", CountTotal)
-	// fmt.Println("CountErr:", CountErr)
-	// fmt.Println("CountOk:", CountOk)
-
-	return all
-}
-
-type XWalker struct {
+type Walker struct {
 	ents []Entry
 	mu   sync.Mutex
 }
 
-func (x *XWalker) Walk(path string, typ os.FileMode, rc io.ReadCloser) error {
+func (w *Walker) Walk(path string, typ os.FileMode, rc io.ReadCloser) error {
 	if typ.IsDir() {
 		return nil
 	}
@@ -556,20 +309,20 @@ func (x *XWalker) Walk(path string, typ os.FileMode, rc io.ReadCloser) error {
 		fmt.Fprintf(os.Stderr, "error (decode - %s): %s\n", path, err)
 		return nil
 	}
-	x.mu.Lock()
-	x.ents = append(x.ents, ents...)
-	x.mu.Unlock()
+	w.mu.Lock()
+	w.ents = append(w.ents, ents...)
+	w.mu.Unlock()
 	return nil
 }
 
-func (x *XWalker) EncodeJSON(filename string) error {
+func (w *Walker) EncodeJSON(filename string) error {
 	f, err := os.OpenFile(filename, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 	enc := json.NewEncoder(f)
-	for _, e := range x.ents {
+	for _, e := range w.ents {
 		if e.Log == nil {
 			continue
 		}
@@ -649,7 +402,7 @@ func main() {
 	{
 		start := time.Now()
 		t := start
-		var x XWalker
+		var x Walker
 		fmt.Fprintln(os.Stderr, "walk start")
 		if err := walk.Walk(os.Args[1], x.Walk); err != nil {
 			Fatal(err)
@@ -691,14 +444,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "print done:", d, d/time.Duration(len(x.ents)))
 		fmt.Fprintln(os.Stderr, "total:", total, total/time.Duration(len(x.ents)))
 		return
-	}
-
-	// p := Printer{w: os.Stdout}
-	ents := Walk(os.Args[1])
-	for _, e := range ents {
-		if err := p.EncodePretty(e.Log); err != nil {
-			Fatal(err)
-		}
 	}
 }
 
