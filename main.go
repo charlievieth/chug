@@ -429,6 +429,13 @@ func PrintMemstats() {
 	PrintJSON(x)
 }
 
+// TODO:
+// - allow source colors to be set via the environment using a JSON map[string]string.
+// - add support for streaming stdint
+// - add support for writing to file
+// - allow max workers to be configured
+// - '-r' works without specifying path use PWD
+
 func main() {
 	if len(os.Args) != 2 {
 		Fatal("USAGE: PATH")
