@@ -262,9 +262,78 @@ func openFile(name string) (io.ReadCloser, error) {
 type Walker struct {
 	ents []Entry
 	mu   sync.Mutex
+
+	// WARN NEW
+	reqs chan WalkRequest
+	wg   sync.WaitGroup
+}
+
+type WalkRequest struct {
+	path string
+	typ  os.FileMode
+	rc   io.ReadCloser
+}
+
+func (w *Walker) Worker() {
+Loop:
+	for r := range w.reqs {
+		if r.typ.IsDir() {
+			continue Loop
+		}
+		if !hasSuffix(r.path, ".log") {
+			ok, err := filepath.Match("*.log.*.gz", filepath.Base(r.path))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error (match - %s): %s\n", r.path, err)
+				continue Loop
+			}
+			if !ok {
+				continue Loop
+			}
+		}
+		var xrc io.ReadCloser
+		switch {
+		case r.rc != nil:
+			defer r.rc.Close()
+			if hasSuffix(r.path, ".gz") {
+				gz, err := gzip.NewReader(r.rc)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error (rc - %s): %s\n", r.path, err)
+					continue Loop
+				}
+				xrc = gz
+			} else {
+				xrc = r.rc
+			}
+		case r.typ.IsRegular():
+			var err error
+			xrc, err = openFile(r.path)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error (file - %s): %s\n", r.path, err)
+				continue Loop
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "WTF (path - %s): %s - %#v\n", r.path, r.typ, r.rc)
+			continue Loop
+		}
+		defer xrc.Close()
+		ents, err := DecodeValidEntries(xrc)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error (decode - %s): %s\n", r.path, err)
+			continue Loop
+		}
+		w.mu.Lock()
+		w.ents = append(w.ents, ents...)
+		w.mu.Unlock()
+		continue Loop
+	}
 }
 
 func (w *Walker) Walk(path string, typ os.FileMode, rc io.ReadCloser) error {
+	w.reqs <- WalkRequest{path, typ, rc}
+	return nil
+}
+
+func (w *Walker) XWalk(path string, typ os.FileMode, rc io.ReadCloser) error {
 	if typ.IsDir() {
 		return nil
 	}
@@ -402,11 +471,20 @@ func main() {
 	{
 		start := time.Now()
 		t := start
-		var x Walker
+		x := Walker{
+			reqs: make(chan WalkRequest, 4),
+		}
+		for i := 0; i < 4; i++ {
+			x.wg.Add(1)
+			go x.Worker()
+		}
+
 		fmt.Fprintln(os.Stderr, "walk start")
 		if err := walk.Walk(os.Args[1], x.Walk); err != nil {
 			Fatal(err)
 		}
+		close(x.reqs) // WARN NEW
+		x.wg.Wait()   // WARN NEW
 		d := time.Since(t)
 		fmt.Fprintln(os.Stderr, "walk done:", d, d/time.Duration(len(x.ents)))
 
