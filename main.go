@@ -275,60 +275,28 @@ type WalkRequest struct {
 }
 
 func (w *Walker) Worker() {
-Loop:
+	defer w.wg.Done()
 	for r := range w.reqs {
-		if r.typ.IsDir() {
-			continue Loop
+		if err := w.XWalk(r.path, r.typ, r.rc); err != nil {
+			fmt.Fprintf(os.Stderr, "error (%+v): %s\n", r, err)
 		}
-		if !hasSuffix(r.path, ".log") {
-			ok, err := filepath.Match("*.log.*.gz", filepath.Base(r.path))
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error (match - %s): %s\n", r.path, err)
-				continue Loop
-			}
-			if !ok {
-				continue Loop
-			}
-		}
-		var xrc io.ReadCloser
-		switch {
-		case r.rc != nil:
-			defer r.rc.Close()
-			if hasSuffix(r.path, ".gz") {
-				gz, err := gzip.NewReader(r.rc)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "error (rc - %s): %s\n", r.path, err)
-					continue Loop
-				}
-				xrc = gz
-			} else {
-				xrc = r.rc
-			}
-		case r.typ.IsRegular():
-			var err error
-			xrc, err = openFile(r.path)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error (file - %s): %s\n", r.path, err)
-				continue Loop
-			}
-		default:
-			fmt.Fprintf(os.Stderr, "WTF (path - %s): %s - %#v\n", r.path, r.typ, r.rc)
-			continue Loop
-		}
-		defer xrc.Close()
-		ents, err := DecodeValidEntries(xrc)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error (decode - %s): %s\n", r.path, err)
-			continue Loop
-		}
-		w.mu.Lock()
-		w.ents = append(w.ents, ents...)
-		w.mu.Unlock()
-		continue Loop
 	}
 }
 
 func (w *Walker) Walk(path string, typ os.FileMode, rc io.ReadCloser) error {
+	if typ.IsDir() {
+		return nil
+	}
+	if !hasSuffix(path, ".log") {
+		ok, err := filepath.Match("*.log.*.gz", filepath.Base(path))
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error (match - %s): %s\n", path, err)
+			return nil
+		}
+		if !ok {
+			return nil
+		}
+	}
 	w.reqs <- WalkRequest{path, typ, rc}
 	return nil
 }
@@ -472,9 +440,9 @@ func main() {
 		start := time.Now()
 		t := start
 		x := Walker{
-			reqs: make(chan WalkRequest, 4),
+			reqs: make(chan WalkRequest, 8),
 		}
-		for i := 0; i < 4; i++ {
+		for i := 0; i < 8; i++ {
 			x.wg.Add(1)
 			go x.Worker()
 		}
@@ -494,15 +462,15 @@ func main() {
 		d = time.Since(t)
 		fmt.Fprintln(os.Stderr, "sort done:", d, d/time.Duration(len(x.ents)))
 
-		{
-			fmt.Fprintln(os.Stderr, "json start")
-			if err := x.EncodeJSON("out.json"); err != nil {
-				Fatal(err)
-			}
-			d = time.Since(start)
-			fmt.Fprintln(os.Stderr, "json done:", d, d/time.Duration(len(x.ents)))
-			return
-		}
+		// {
+		// 	fmt.Fprintln(os.Stderr, "json start")
+		// 	if err := x.EncodeJSON("out.json"); err != nil {
+		// 		Fatal(err)
+		// 	}
+		// 	d = time.Since(start)
+		// 	fmt.Fprintln(os.Stderr, "json done:", d, d/time.Duration(len(x.ents)))
+		// 	return
+		// }
 
 		fmt.Fprintln(os.Stderr, "print start")
 		t = time.Now()
@@ -513,6 +481,8 @@ func main() {
 			if err := p.EncodePretty(e.Log); err != nil {
 				Fatal(err)
 			}
+			e.Log = nil // WARN: NEW
+			e.Raw = nil // WARN: NEW
 		}
 		if err := out.Flush(); err != nil {
 			Fatal(err)
