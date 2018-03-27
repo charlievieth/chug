@@ -1,6 +1,5 @@
 chug
 *.exe
 *.txt
-tmp
 *.out
 *.test
