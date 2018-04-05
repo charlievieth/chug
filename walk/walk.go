@@ -2,16 +2,14 @@ package walk
 
 import (
 	"archive/tar"
-	"bufio"
-	"bytes"
-	"compress/gzip"
 	"errors"
 	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sync"
+
+	"github.com/charlievieth/chug/util"
 )
 
 // TraverseLink is a sentinel error for Walk, similar to filepath.SkipDir.
@@ -173,28 +171,26 @@ func (w *walker) onDirEnt(dirName, baseName string, typ os.FileMode) error {
 
 func (w *walker) onTarEnt(dirName string, hdr *tar.Header, tr *tar.Reader) error {
 	// TODO (CEV): maybe some of this logic should live in readArchive ???
+
 	if extArchive(hdr.Name) {
-		buf := newBuffer()
-		buf.Grow(int(hdr.Size) + bytes.MinRead)
-		if _, err := buf.ReadFrom(tr); err != nil {
-			bufferPool.Put(buf)
+		buf, err := util.ReadAllSize(tr, hdr.Size)
+		if err != nil {
+			buf.Close()
 			return err
 		}
 		if extGzip(hdr.Name) {
-			gz, err := gzip.NewReader(buf)
+			gr, err := util.NewGzipReadCloser(buf)
 			if err != nil {
-				bufferPool.Put(buf)
+				buf.Close()
 				return err
 			}
-			w.enqueue(walkItem{dir: dirName, archive: gzipReadCloser{
-				buf: buf,
-				gz:  gz,
-			}})
+			w.enqueue(walkItem{dir: dirName, archive: gr})
 			return nil
 		}
-		w.enqueue(walkItem{dir: dirName, archive: bufferReadCloser{Buffer: buf}})
+		w.enqueue(walkItem{dir: dirName, archive: buf})
 		return nil
 	}
+
 	// CEV: do we want to check if we care about the file first?
 	return w.fn(hdr.Name, 0, ioutil.NopCloser(tr))
 }
@@ -280,16 +276,11 @@ func openFile(name string) (io.ReadCloser, error) {
 		return nil, err
 	}
 	if extGzip(name) {
-		// gzip will wrap the reading in a bufio.Reader if it
-		// does not implement ByteReader, use a slightly larger
-		// buffer than the default size of 4096 to reduce the
-		// number of syscalls.
-		gz, err := gzip.NewReader(bufio.NewReaderSize(f, 64*1024))
+		gr, err := util.NewGzipReadCloser(f)
 		if err != nil {
 			f.Close()
-			return nil, err
 		}
-		return gzipFileCloser{gz: gz, file: f}, nil
+		return gr, err
 	}
 	return f, nil
 }
@@ -308,99 +299,3 @@ func extArchive(name string) bool {
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
-
-var bufferPool sync.Pool
-
-func newBuffer() *bytes.Buffer {
-	if v := bufferPool.Get(); v != nil {
-		b := v.(*bytes.Buffer)
-		b.Reset()
-		return b
-	}
-	return new(bytes.Buffer)
-}
-
-type bufferReadCloser struct {
-	*bytes.Buffer
-}
-
-func (b bufferReadCloser) Close() error {
-	if b.Buffer != nil {
-		bufferPool.Put(b.Buffer)
-	}
-	return nil
-}
-
-type gzipFileCloser struct {
-	gz   *gzip.Reader
-	file *os.File
-}
-
-func (g gzipFileCloser) Read(p []byte) (int, error) {
-	return g.gz.Read(p)
-}
-
-func (g gzipFileCloser) Close() error {
-	g.file.Close()
-	return g.gz.Close()
-}
-
-type gzipReadCloser struct {
-	buf *bytes.Buffer
-	gz  *gzip.Reader
-}
-
-func (g gzipReadCloser) Read(p []byte) (int, error) {
-	return g.gz.Read(p)
-}
-
-func (g gzipReadCloser) Close() error {
-	bufferPool.Put(g.buf)
-	return g.gz.Close()
-}
-
-/*
-type lazyFile struct {
-	file *os.File
-	name string
-}
-
-func (l *lazyFile) lazyInit() error {
-	if l.file != nil {
-		return nil
-	}
-	var err error
-	l.file, err = os.Open(l.name)
-	return err
-}
-
-func (l *lazyFile) Read(p []byte) (int, error) {
-	if err := l.lazyInit(); err != nil {
-		return 0, err
-	}
-	return l.file.Read(p)
-}
-
-func (l *lazyFile) Close() error {
-	if l.file != nil {
-		return l.file.Close()
-	}
-	return nil
-}
-*/
-
-/*
-var gzipReaderPool sync.Pool
-
-func newGzipReader(r io.Reader) (*gzip.Reader, error) {
-	if v := gzipReaderPool.Get(); v != nil {
-		gz := v.(*gzip.Reader)
-		if err := gz.Reset(r); err != nil {
-			gzipReaderPool.Put(gz)
-			return nil, err
-		}
-		return gz, nil
-	}
-	return gzip.NewReader(r)
-}
-*/

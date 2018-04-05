@@ -136,7 +136,6 @@ type CombinedFormat struct {
 	LevelV1   LogLevel                   `json:"log_level"`
 	LevelV2   LogLevel                   `json:"level"`
 	Data      map[string]json.RawMessage `json:"data,omitempty"` // lazily parsed
-	Error     error                      `json:"-"`
 }
 
 func (c *CombinedFormat) LogLevel() LogLevel {
@@ -169,17 +168,15 @@ func (l *LogEntry) Equal(e *LogEntry) bool {
 }
 
 func extractStringValue(m map[string]json.RawMessage, key string) string {
-	var s string
-	b, ok := m[key]
-	if ok {
+	if b, ok := m[key]; ok {
 		delete(m, key)
 		if len(b) > 2 {
 			if ub, ok := unquoteBytes(b); ok && len(ub) != 0 {
-				s = string(ub)
+				return string(ub)
 			}
 		}
 	}
-	return s
+	return ""
 }
 
 func ParseLogEntry(b []byte) (*LogEntry, error) {
@@ -213,9 +210,3 @@ func ParseLogEntry(b []byte) (*LogEntry, error) {
 	}
 	return ent, nil
 }
-
-type logByTime []LogEntry
-
-func (e logByTime) Len() int           { return len(e) }
-func (e logByTime) Less(i, j int) bool { return e[i].Timestamp.Before(e[j].Timestamp) }
-func (e logByTime) Swap(i, j int)      { e[i], e[j] = e[j], e[i] }

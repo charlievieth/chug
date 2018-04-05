@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -44,48 +43,6 @@ func (e entryByTime) Less(i, j int) bool {
 	return e[i].Log != nil && e[j].Log != nil &&
 		e[i].Log.Timestamp.Before(e[j].Log.Timestamp)
 }
-
-var bufferPool sync.Pool
-
-func newBuffer() *bytes.Buffer {
-	if v := bufferPool.Get(); v != nil {
-		b := v.(*bytes.Buffer)
-		b.Reset()
-		return b
-	}
-	return new(bytes.Buffer)
-}
-
-func putBuffer(b *bytes.Buffer) {
-	bufferPool.Put(b)
-}
-
-type bufferReadCloser struct {
-	*bytes.Buffer
-}
-
-func (b bufferReadCloser) Close() error {
-	putBuffer(b.Buffer)
-	return nil
-}
-
-type gzipReadCloser struct {
-	buf *bytes.Buffer
-	gz  *gzip.Reader
-}
-
-func (g gzipReadCloser) Read(p []byte) (int, error) {
-	return g.gz.Read(p)
-}
-
-func (g gzipReadCloser) Close() error {
-	putBuffer(g.buf)
-	return g.gz.Close()
-}
-
-type nopCloser struct{ io.Reader }
-
-func (nopCloser) Close() error { return nil }
 
 var readerPool sync.Pool
 
@@ -296,6 +253,9 @@ func (w *Walker) Walk(path string, typ os.FileMode, rc io.ReadCloser) error {
 		if !ok {
 			return nil
 		}
+	}
+	if rc != nil {
+
 	}
 	w.reqs <- WalkRequest{path, typ, rc}
 	return nil

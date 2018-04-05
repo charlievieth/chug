@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -253,6 +255,206 @@ func Walk(root string) []*Report {
 	return all
 }
 
+type LogEntry struct {
+	Timestamp time.Time
+	LogLevel  LogLevel
+	Source    string
+	Message   string
+	Session   string
+	Error     string
+	Trace     string
+	Data      json.RawMessage // lazily parsed
+}
+
+/*
+	Match Fields:
+
+	Timestamp
+	LogLevel
+	Source
+	Message
+	Session
+	Error
+	Trace
+	Data
+*/
+
+type LagerMatcher struct {
+	Timestamp *TimeMatcher
+	LogLevel  *MinLogLevelMatcher
+	Source    *PatternMatcher
+	Message   *PatternMatcher
+	Session   *PatternMatcher
+	Error     *PatternMatcher
+	Trace     *PatternMatcher
+	Data      *PatternMatcher
+}
+
+func (m *LagerMatcher) isEmpty(allFields bool) bool {
+	return (!allFields || m.Timestamp == nil) && (!allFields || m.LogLevel == nil) &&
+		m.Source == nil && m.Message == nil && m.Session == nil && m.Error == nil &&
+		m.Trace == nil && m.Data == nil
+}
+
+func (m *LagerMatcher) Candidate(line []byte) bool {
+	if m.isEmpty(false) {
+		return true
+	}
+
+	return (m.Source != nil && m.Source.Match(line)) ||
+		(m.Message != nil && m.Message.Match(line)) ||
+		(m.Session != nil && m.Session.Match(line)) ||
+		(m.Error != nil && m.Error.Match(line)) ||
+		(m.Trace != nil && m.Trace.Match(line)) ||
+		(m.Data != nil && m.Data.Match(line))
+}
+
+func (m *LagerMatcher) Match(e *LogEntry) bool {
+	if m.isEmpty(true) {
+		return true
+	}
+
+	// exclusive matches
+	if m.LogLevel != nil && !m.LogLevel.Match(e.LogLevel) {
+		return false
+	}
+	if m.Timestamp != nil && !m.Timestamp.Match(e.Timestamp) {
+		return false
+	}
+
+	// TODO:
+	//  - require everything to match?
+	//  - what about negative matches (exclusions)?
+	//
+	if m.Source != nil && e.Source != "" && m.Source.MatchString(e.Source) {
+		return true
+	}
+	if m.Message != nil && e.Message != "" && m.Message.MatchString(e.Message) {
+		return true
+	}
+	if m.Session != nil && e.Session != "" && m.Session.MatchString(e.Session) {
+		return true
+	}
+	if m.Error != nil && e.Error != "" && m.Error.MatchString(e.Error) {
+		return true
+	}
+	if m.Trace != nil && e.Trace != "" && m.Trace.MatchString(e.Trace) {
+		return true
+	}
+	if m.Data != nil && m.Data.Match(e.Data) {
+		return true
+	}
+	return false
+}
+
+type TimeMatcher struct {
+	Min, Max time.Time
+}
+
+func NewTimeMatcher(min, max time.Time) (*TimeMatcher, error) {
+	if !max.IsZero() && min.After(max) {
+		return nil, fmt.Errorf("TimeMatcher: min (%s) occurs after max (%s)", min, max)
+	}
+	m := &TimeMatcher{
+		Min: min,
+		Max: max,
+	}
+	return m, nil
+}
+
+func (m *TimeMatcher) Match(t time.Time) bool {
+	zMin := m.Min.IsZero()
+	zMax := m.Max.IsZero()
+	if !zMin && !zMax {
+		return m.Min.Before(t) && m.Max.After(t)
+	}
+	if !zMin {
+		return m.Min.Before(t)
+	}
+	if !zMax {
+		return m.Max.After(t)
+	}
+	return true
+}
+
+// TODO: use ("(log_)?level":\s*(1|"info")) to match candidates
+type MinLogLevelMatcher LogLevel
+
+func NewMinLogLevelMatcher(v LogLevel) (MinLogLevelMatcher, error) {
+	if !v.valid() {
+		return 0, fmt.Errorf("invalid LogLevel: %d", v)
+	}
+	return MinLogLevelMatcher(v), nil
+}
+
+func (m MinLogLevelMatcher) Match(v LogLevel) bool { return v >= LogLevel(m) }
+
+type LogLevelMatcher struct {
+	levels [FATAL + 1]bool
+}
+
+func NewLogLevelMatcher(levels ...LogLevel) (LogLevelMatcher, error) {
+	var m LogLevelMatcher
+	if len(levels) == 0 {
+		return m, errors.New("no LogLevels specified")
+	}
+	for _, v := range levels {
+		if !v.valid() {
+			return m, fmt.Errorf("invalid LogLevel: %d", v)
+		}
+		m.levels[v] = true
+	}
+	return m, nil
+}
+
+func (m LogLevelMatcher) Match(v LogLevel) bool {
+	return v.valid() && m.levels[v]
+}
+
+func isRegex(s string) bool { return strings.ContainsAny(s, "$()*+.?[\\]^{|}") }
+
+type PatternMatcher struct {
+	expr  string
+	bexpr []byte
+	re    *regexp.Regexp
+}
+
+func NewPatternMatcher(expr string) (*PatternMatcher, error) {
+	var re *regexp.Regexp
+	if isRegex(expr) {
+		var err error
+		re, err = regexp.Compile(expr)
+		if err != nil {
+			return nil, err
+		}
+	}
+	m := &PatternMatcher{
+		expr:  expr,
+		bexpr: []byte(expr),
+		re:    re,
+	}
+	return m, nil
+}
+
+func (m *PatternMatcher) Match(b []byte) bool {
+	if m.re != nil {
+		return m.re.Match(b)
+	}
+	return bytes.Contains(b, m.bexpr)
+}
+
+func (m *PatternMatcher) MatchString(s string) bool {
+	if m.re != nil {
+		return m.re.MatchString(s)
+	}
+	return strings.Contains(s, m.expr)
+}
+
+type Matcher interface {
+	Match(b []byte) bool
+	MatchString(s string) bool
+}
+
 type GlobSet []string
 
 func (g GlobSet) Len() int { return len(g) }
@@ -319,6 +521,18 @@ func (f *FileSelection) Include(path string) bool {
 }
 
 func main() {
+	{
+		var m LagerMatcher
+		fmt.Println(m.xEmpty(true))
+		fmt.Println(m.xEmpty(false))
+
+		// m.Timestamp = new(TimeMatcher)
+		m.Source = new(PatternMatcher)
+		fmt.Println(m.xEmpty(true))
+		fmt.Println(m.xEmpty(false))
+		return
+	}
+
 	globs := []string{
 		"*abc*",
 		"*a?c*",
