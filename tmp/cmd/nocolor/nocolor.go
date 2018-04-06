@@ -40,8 +40,8 @@ func ReadlinesNoColor(rd io.Reader) (int, error) {
 	r := newReader(rd)
 	for {
 		b, e := r.ReadLine()
-		// b = StripColor(b)
-		b = StripColor2(b)
+		b = StripColor(b)
+		// b = StripColor2(b)
 		if len(b) != 0 {
 			lines++
 		}
@@ -57,50 +57,12 @@ func ReadlinesNoColor(rd io.Reader) (int, error) {
 }
 
 func StripColor(b []byte) []byte {
-	if bytes.IndexByte(b, '\x1b') < 0 {
+	if bytes.IndexByte(b, '\x1b') == -1 {
 		return b
 	}
 	return colorRe.ReplaceAllFunc(b, func(_ []byte) []byte {
 		return nil
-		// return []byte{}
 	})
-	// return colorRe.ReplaceAll(b, []byte{})
-}
-
-func StripColor2(b []byte) []byte {
-	// TODO: use IndexByte()
-	if bytes.IndexByte(b, '\x1b') < 0 {
-		return b
-	}
-	all := colorRe.FindAllIndex(b, -1)
-	if len(all) == 0 {
-		return b
-	}
-	var last int
-	z := b[:0]
-	for _, x := range all {
-		z = append(z, b[last:x[0]]...)
-		last = x[1]
-	}
-	z = append(z, b[last:]...)
-	return z
-}
-
-func StripColor3(b []byte) []byte {
-	n := 0
-	for i := 0; i < len(b); i++ {
-		c := b[i]
-		if c == '\x1b' {
-			i++
-			for b[i] != 'm' {
-				i++
-			}
-		} else {
-			b[n] = c
-			n++
-		}
-	}
-	return b[:n]
 }
 
 var colorRe = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]")
@@ -110,8 +72,7 @@ func colorless(rd io.Reader, out io.Writer) error {
 	r := newReader(rd)
 	for {
 		b, e := r.ReadLine()
-		// b = StripColor(b)
-		b = StripColor2(b)
+		b = StripColor(b)
 		if len(b) != 0 {
 			out.Write(append(b, '\n'))
 		}
