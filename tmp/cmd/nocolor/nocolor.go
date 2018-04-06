@@ -103,7 +103,7 @@ func StripColor3(b []byte) []byte {
 	return b[:n]
 }
 
-var colorRe = regexp.MustCompile("\x1b\\[[0-9;]+m")
+var colorRe = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]")
 
 func colorless(rd io.Reader, out io.Writer) error {
 	var err error
@@ -127,7 +127,7 @@ func colorless(rd io.Reader, out io.Writer) error {
 }
 
 func xmain() {
-	const name = "/Users/charlie/go/src/github.com/charlievieth/chug/testdata/test.json"
+	const name = "../../../testdata/test.json"
 	b, err := ioutil.ReadFile(name)
 	if err != nil {
 		panic(err)

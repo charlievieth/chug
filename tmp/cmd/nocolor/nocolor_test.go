@@ -9,7 +9,7 @@ import (
 var TestReader *bytes.Reader
 
 func init() {
-	const name = "/Users/charlie/go/src/github.com/charlievieth/chug/testdata/test.json"
+	const name = "../../../testdata/test.json"
 	b, err := ioutil.ReadFile(name)
 	if err != nil {
 		panic(err)
