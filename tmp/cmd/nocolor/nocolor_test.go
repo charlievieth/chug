@@ -19,7 +19,9 @@ func init() {
 }
 
 func TestStripColor(t *testing.T) {
-	//
+	// base64 encoded log lines (saves the trouble of dealing with JSON and
+	// ANSI escape sequences)
+
 	const NoColorLogLine = "eyJ0aW1lc3RhbXAiOiIxNTIwOTgzODAyLjQyOTA0NjE1NCIsInNvdXJjZSI6InJl" +
 		"cCIsIm1lc3NhZ2UiOiJyZXAuY29udGFpbmVyLW1ldHJpY3MtcmVwb3J0ZXIudGljay5nZXQtYWxsLW1ldHJ" +
 		"pY3MuY29udGFpbmVyc3RvcmUtbWV0cmljcy5zdGFydGluZyIsImxvZ19sZXZlbCI6MSwiZGF0YSI6eyJzZX" +

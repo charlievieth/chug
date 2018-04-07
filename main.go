@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charlievieth/chug/util"
 	"github.com/charlievieth/chug/walk"
 )
 
@@ -44,55 +45,6 @@ func (e entryByTime) Less(i, j int) bool {
 		e[i].Log.Timestamp.Before(e[j].Log.Timestamp)
 }
 
-var readerPool sync.Pool
-
-func newReader(rd io.Reader) *Reader {
-	if v := readerPool.Get(); v != nil {
-		r := v.(*Reader)
-		r.Reset(rd)
-		return r
-	}
-	return &Reader{b: bufio.NewReaderSize(rd, 32*1014)}
-}
-
-func putReader(r *Reader) {
-	r.b.Reset(nil) // Remove reference
-	readerPool.Put(r)
-}
-
-type Reader struct {
-	b   *bufio.Reader
-	buf []byte
-}
-
-func (r *Reader) Reset(rd io.Reader) {
-	r.b.Reset(rd)
-	r.buf = r.buf[:0]
-}
-
-func (r *Reader) ReadLine() ([]byte, error) {
-	var frag []byte
-	var err error
-	r.buf = r.buf[:0]
-	for {
-		var e error
-		frag, e = r.b.ReadSlice('\n')
-		if e == nil { // got final fragment
-			break
-		}
-		if e != bufio.ErrBufferFull { // unexpected error
-			err = e
-			break
-		}
-		r.buf = append(r.buf, frag...)
-	}
-	// do not include newline
-	if len(frag) > 1 {
-		r.buf = append(r.buf, frag[:len(frag)-1]...)
-	}
-	return r.buf, err
-}
-
 func DecodeEntriesFile(name string) ([]Entry, error) {
 	f, err := os.Open(name)
 	if err != nil {
@@ -103,8 +55,7 @@ func DecodeEntriesFile(name string) ([]Entry, error) {
 }
 
 func DecodeEntries(rd io.Reader) ([]Entry, error) {
-	r := newReader(rd)
-	defer putReader(r)
+	r := util.NewReader(rd)
 	var err error
 	var ents []Entry
 	for {
@@ -123,8 +74,7 @@ func DecodeEntries(rd io.Reader) ([]Entry, error) {
 }
 
 func DecodeValidEntries(rd io.Reader) ([]Entry, error) {
-	r := newReader(rd)
-	defer putReader(r)
+	r := util.NewReader(rd)
 	var err error
 	var ents []Entry
 	invalid := 0
@@ -151,54 +101,7 @@ func DecodeValidEntries(rd io.Reader) ([]Entry, error) {
 	return ents, err
 }
 
-func DecodeEntriesFast(rd io.Reader) ([]Entry, error) {
-	lines := make(chan []byte, 8)
-	out := make(chan Entry, 8)
-	wg := new(sync.WaitGroup)
-	for i := 0; i < runtime.NumCPU()-1; i++ {
-		wg.Add(1)
-		go func(in chan []byte, out chan Entry, wg *sync.WaitGroup) {
-			defer wg.Done()
-			for b := range in {
-				out <- ParseEntry(b)
-			}
-		}(lines, out, wg)
-	}
-
-	go func() {
-		r := newReader(rd)
-		defer putReader(r)
-		var err error
-		var buf []byte
-		for err == nil {
-			buf, err = r.ReadLine()
-			// trim trailing newline
-			if len(buf) >= 1 && buf[len(buf)-1] == '\n' {
-				buf = buf[:len(buf)-1]
-			}
-			if len(buf) != 0 {
-				// TODO: use a buffer pool
-				b := make([]byte, len(buf))
-				copy(b, buf)
-				lines <- b
-			}
-		}
-		if err != io.EOF {
-			Fatal(err) // WARN
-		}
-		close(lines)
-		wg.Wait()
-		close(out)
-	}()
-
-	var ents []Entry
-	for e := range out {
-		ents = append(ents, e)
-	}
-
-	return ents, nil
-}
-
+// TODO: move to util - share with walk
 func openFile(name string) (io.ReadCloser, error) {
 	f, err := os.Open(name)
 	if err != nil {
@@ -234,7 +137,7 @@ type WalkRequest struct {
 func (w *Walker) Worker() {
 	defer w.wg.Done()
 	for r := range w.reqs {
-		if err := w.XWalk(r.path, r.typ, r.rc); err != nil {
+		if err := w.Parse(r.path, r.typ, r.rc); err != nil {
 			fmt.Fprintf(os.Stderr, "error (%+v): %s\n", r, err)
 		}
 	}
@@ -254,27 +157,12 @@ func (w *Walker) Walk(path string, typ os.FileMode, rc io.ReadCloser) error {
 			return nil
 		}
 	}
-	if rc != nil {
-
-	}
 	w.reqs <- WalkRequest{path, typ, rc}
 	return nil
 }
 
-func (w *Walker) XWalk(path string, typ os.FileMode, rc io.ReadCloser) error {
-	if typ.IsDir() {
-		return nil
-	}
-	if !hasSuffix(path, ".log") {
-		ok, err := filepath.Match("*.log.*.gz", filepath.Base(path))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error (match - %s): %s\n", path, err)
-			return nil
-		}
-		if !ok {
-			return nil
-		}
-	}
+// TODO: this is a mess - fix
+func (w *Walker) Parse(path string, typ os.FileMode, rc io.ReadCloser) error {
 	var xrc io.ReadCloser
 	switch {
 	case rc != nil:
@@ -306,9 +194,11 @@ func (w *Walker) XWalk(path string, typ os.FileMode, rc io.ReadCloser) error {
 		fmt.Fprintf(os.Stderr, "error (decode - %s): %s\n", path, err)
 		return nil
 	}
-	w.mu.Lock()
-	w.ents = append(w.ents, ents...)
-	w.mu.Unlock()
+	if len(ents) != 0 {
+		w.mu.Lock()
+		w.ents = append(w.ents, ents...)
+		w.mu.Unlock()
+	}
 	return nil
 }
 
@@ -330,71 +220,16 @@ func (w *Walker) EncodeJSON(filename string) error {
 	return nil
 }
 
-func ParseJSON(filename string) ([]LogEntry, error) {
-	f, err := os.Open(filename)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	dec := json.NewDecoder(f)
-	var logs []LogEntry
-	for {
-		var e LogEntry
-		if e := dec.Decode(&e); e != nil {
-			if e != io.EOF {
-				err = e
-			}
-			break
-		}
-		logs = append(logs, e)
-	}
-	return logs, err
-}
-
-func PrintMemstats() {
-	type MemStats struct {
-		Alloc        uint64
-		TotalAlloc   uint64
-		Sys          uint64
-		Lookups      uint64
-		Mallocs      uint64
-		Frees        uint64
-		HeapAlloc    uint64
-		HeapSys      uint64
-		HeapIdle     uint64
-		HeapInuse    uint64
-		HeapReleased uint64
-		HeapObjects  uint64
-		StackInuse   uint64
-		StackSys     uint64
-	}
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	x := MemStats{
-		Alloc:        m.Alloc,
-		TotalAlloc:   m.TotalAlloc,
-		Sys:          m.Sys,
-		Lookups:      m.Lookups,
-		Mallocs:      m.Mallocs,
-		Frees:        m.Frees,
-		HeapAlloc:    m.HeapAlloc,
-		HeapSys:      m.HeapSys,
-		HeapIdle:     m.HeapIdle,
-		HeapInuse:    m.HeapInuse,
-		HeapReleased: m.HeapReleased,
-		HeapObjects:  m.HeapObjects,
-		StackInuse:   m.StackInuse,
-		StackSys:     m.StackSys,
-	}
-	PrintJSON(x)
-}
-
 // TODO:
-// - allow source colors to be set via the environment using a JSON map[string]string.
-// - add support for streaming stdint
-// - add support for writing to file
-// - allow max workers to be configured
-// - '-r' works without specifying path use PWD
+//  - strip ANSI escape sequences
+//  - allow source colors to be set via the environment using a JSON map[string]string.
+//  - add support for streaming stdint
+//  - add support for writing to file
+//  - allow max workers to be configured
+//  - '-r' works without specifying path use PWD
+//  - xz support
+//
+// See TODO section of walk/walk.go
 
 func main() {
 	if len(os.Args) != 2 {
@@ -463,6 +298,7 @@ func main() {
 }
 
 type Config struct {
+	Recurse        bool
 	Sort           bool
 	AllLogs        bool
 	FollowSymlinks bool
@@ -518,3 +354,26 @@ func maybeJSON(b []byte) bool {
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
+
+/*
+func ParseJSON(filename string) ([]LogEntry, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	dec := json.NewDecoder(f)
+	var logs []LogEntry
+	for {
+		var e LogEntry
+		if e := dec.Decode(&e); e != nil {
+			if e != io.EOF {
+				err = e
+			}
+			break
+		}
+		logs = append(logs, e)
+	}
+	return logs, err
+}
+*/

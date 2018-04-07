@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"time"
+
+	"github.com/charlievieth/chug/util"
 )
 
 // TODO: delete if nothing uses it
@@ -88,6 +90,9 @@ func (t Timestamp) Time() time.Time              { return time.Time(t) }
 func (t Timestamp) String() string               { return time.Time(t).String() }
 func (t Timestamp) MarshalJSON() ([]byte, error) { return time.Time(t).MarshalJSON() }
 
+// TODO: we rely upon and lager uses a 9 digit nanosecond timestamp the
+// current implementation is incorrect and can be simplified by checking
+// for the decimal seperator with S[len(s)-9] (approximately).
 func parseUnixTimestamp(b []byte) (time.Time, bool) {
 	// N.B. I was a bored when I wrote this so its a bit over-optimized.
 	var dot bool
@@ -179,6 +184,7 @@ func extractStringValue(m map[string]json.RawMessage, key string) string {
 	return ""
 }
 
+// TODO: this should only be used when handling a very large number of entries
 func ParseLogEntry(b []byte) (*LogEntry, error) {
 	var log CombinedFormat
 	if err := json.Unmarshal(b, &log); err != nil {
@@ -199,14 +205,14 @@ func ParseLogEntry(b []byte) (*LogEntry, error) {
 		// more than we need.  By copying to a slice of the exact size
 		// we reduce memory consumption by ~30%.  This is particularly
 		// important when handling large log sets.
-		buf := newBuffer()
+		buf := util.NewBuffer()
 		if err := json.NewEncoder(buf).Encode(log.Data); err != nil {
-			putBuffer(buf)
+			util.PutBuffer(buf)
 			return nil, err
 		}
 		ent.Data = make([]byte, buf.Len())
 		copy(ent.Data, buf.Bytes())
-		putBuffer(buf)
+		util.PutBuffer(buf)
 	}
 	return ent, nil
 }

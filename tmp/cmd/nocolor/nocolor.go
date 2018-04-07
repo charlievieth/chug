@@ -56,6 +56,8 @@ func ReadlinesNoColor(rd io.Reader) (int, error) {
 	return lines, err
 }
 
+var colorRe = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]")
+
 func StripColor(b []byte) []byte {
 	if bytes.IndexByte(b, '\x1b') == -1 {
 		return b
@@ -64,8 +66,6 @@ func StripColor(b []byte) []byte {
 		return nil
 	})
 }
-
-var colorRe = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]")
 
 func colorless(rd io.Reader, out io.Writer) error {
 	var err error

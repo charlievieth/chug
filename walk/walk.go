@@ -2,15 +2,27 @@ package walk
 
 import (
 	"archive/tar"
+	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"runtime"
 
 	"github.com/charlievieth/chug/util"
 )
+
+// RACE RACE RACE RACE
+//   Looks like we're racing on the gzip reader - likely due to
+//   mutliple threads trying to access it - this is umm bad...
+// RACE RACE RACE RACE
+
+// TODO:
+//  - Add files to walk (dirs and regular files)
+//   * One thing to consider will be checking filetype by compress
+//     header (gzip, xz, etc...)
+//  - Consider using a seperate function to determine what to walk
 
 // TraverseLink is a sentinel error for Walk, similar to filepath.SkipDir.
 var TraverseLink = errors.New("traverse symlink, assuming target is a directory")
@@ -169,30 +181,70 @@ func (w *walker) onDirEnt(dirName, baseName string, typ os.FileMode) error {
 	return err
 }
 
+// WARN: as predicted the race occurs here for the obvious reasons - nested
+// readers in a highly parallel environment - consuming readers solves this
+// but is a shot in the head to efficiency.
+//
+// Questions: this worked on ditmars - what did I break; an additional
+// function to check if files should be parsed would eliminate the need
+// for wasteful reading.
 func (w *walker) onTarEnt(dirName string, hdr *tar.Header, tr *tar.Reader) error {
 	// TODO (CEV): maybe some of this logic should live in readArchive ???
 
 	if extArchive(hdr.Name) {
-		buf, err := util.ReadAllSize(tr, hdr.Size)
-		if err != nil {
-			buf.Close()
-			return err
-		}
 		if extGzip(hdr.Name) {
-			gr, err := util.NewGzipReadCloser(buf)
+			gr, err := gzip.NewReader(tr)
+			if err != nil {
+				return err
+			}
+			buf, err := util.ReadAll(gr)
 			if err != nil {
 				buf.Close()
 				return err
 			}
-			w.enqueue(walkItem{dir: dirName, archive: gr})
-			return nil
+			w.enqueue(walkItem{dir: dirName, archive: buf})
+		} else {
+			buf, err := util.ReadAllSize(tr, hdr.Size)
+			if err != nil {
+				buf.Close()
+				return err
+			}
+			w.enqueue(walkItem{dir: dirName, archive: buf})
 		}
-		w.enqueue(walkItem{dir: dirName, archive: buf})
 		return nil
 	}
+	// WARN: this appears to remove the race - but is really wasteful
+	// considering we don't even know if we need the file
+	buf, err := util.ReadAllSize(tr, hdr.Size)
+	if err != nil {
+		buf.Close()
+		return err
+	}
+	return w.fn(hdr.Name, 0, buf)
+
+	// if extArchive(hdr.Name) {
+	// 	buf, err := util.ReadAllSize(tr, hdr.Size)
+	// 	if err != nil {
+	// 		buf.Close()
+	// 		return err
+	// 	}
+	// 	if extGzip(hdr.Name) {
+	// 		// return nil
+	// 		// WARN WARN WARN - THE RACE IS HERE!!!
+	// 		gr, err := util.NewGzipReadCloser(buf)
+	// 		if err != nil {
+	// 			buf.Close()
+	// 			return err
+	// 		}
+	// 		w.enqueue(walkItem{dir: dirName, archive: gr})
+	// 		return nil
+	// 	}
+	// 	w.enqueue(walkItem{dir: dirName, archive: buf})
+	// 	return nil
+	// }
 
 	// CEV: do we want to check if we care about the file first?
-	return w.fn(hdr.Name, 0, ioutil.NopCloser(tr))
+	// return w.fn(hdr.Name, 0, ioutil.NopCloser(tr))
 }
 
 func (w *walker) walk(root string, runUserCallback bool, archive io.ReadCloser) error {
@@ -212,6 +264,8 @@ func (w *walker) walk(root string, runUserCallback bool, archive io.ReadCloser) 
 }
 
 func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
+	fmt.Println("archive:", dirName) // WARN
+
 	var err error
 	tr := tar.NewReader(rc)
 	for {
@@ -222,9 +276,11 @@ func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
 			}
 			break
 		}
+		fmt.Println("  name:", hdr.Name) // WARN
 		if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
 			continue
 		}
+		// WARN: shared gzip reader may/will race
 		if err = w.onTarEnt(dirName, hdr, tr); err != nil {
 			break
 		}
@@ -270,6 +326,7 @@ func (w *walker) readDir(dirName string) error {
 	return nil
 }
 
+// TODO: move to utils package
 func openFile(name string) (io.ReadCloser, error) {
 	f, err := os.Open(name)
 	if err != nil {
@@ -285,15 +342,19 @@ func openFile(name string) (io.ReadCloser, error) {
 	return f, nil
 }
 
+// TODO: move to utils package
 func extGzip(name string) bool {
 	return hasSuffix(name, ".gz") || hasSuffix(name, ".tgz")
 }
 
+// TODO: move to utils package
 func extArchive(name string) bool {
 	return hasSuffix(name, ".tar") || hasSuffix(name, ".tgz") ||
 		hasSuffix(name, ".tar.gz")
 }
 
+// TODO: move to utils package
+//
 // hasSuffix tests whether the string s ends with suffix.  Same as
 // strings.HasSuffix, but with a shorter name.
 func hasSuffix(s, suffix string) bool {
