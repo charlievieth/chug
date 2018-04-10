@@ -216,3 +216,9 @@ func ParseLogEntry(b []byte) (*LogEntry, error) {
 	}
 	return ent, nil
 }
+
+// CEV: Idea for lightweight sorting and parsing
+// type MinimalLog struct {
+// 	Timestamp Timestamp         `json:"timestamp"`
+// 	Data      []json.RawMessage `json:"-"`
+// }
