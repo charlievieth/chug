@@ -76,11 +76,11 @@ type GzipReadCloser struct {
 	gz *gzip.Reader
 }
 
-func (g GzipReadCloser) Read(p []byte) (int, error) {
+func (g *GzipReadCloser) Read(p []byte) (int, error) {
 	return g.gz.Read(p)
 }
 
-func (g GzipReadCloser) Close() error {
+func (g *GzipReadCloser) Close() error {
 	if err := g.gz.Close(); err != nil {
 		g.rc.Close()
 		return err
@@ -88,16 +88,16 @@ func (g GzipReadCloser) Close() error {
 	return g.rc.Close()
 }
 
-func NewGzipReadCloser(rc io.ReadCloser) (GzipReadCloser, error) {
+func NewGzipReadCloser(rc io.ReadCloser) (*GzipReadCloser, error) {
 	rr, ok := rc.(flate.Reader)
 	if !ok {
 		rr = bufio.NewReaderSize(rc, defaultBufSize)
 	}
 	gz, err := gzip.NewReader(rr)
 	if err != nil {
-		return GzipReadCloser{}, err
+		return nil, err
 	}
-	return GzipReadCloser{rc: rc, gz: gz}, err
+	return &GzipReadCloser{rc: rc, gz: gz}, nil
 }
 
 type Reader struct {
@@ -169,7 +169,7 @@ var colorRe = regexp.MustCompile("\x1b\\[[0-?]*[ -/]*[@-~]")
 
 // TODO: this is really StripANSI as we remove more than color escape sequences.
 func StripColor(b []byte) []byte {
-	if bytes.IndexByte(b, '\x1b') == -1 {
+	if len(b) == 0 || bytes.IndexByte(b, '\x1b') == -1 {
 		return b
 	}
 	return colorRe.ReplaceAllFunc(b, func(_ []byte) []byte {
