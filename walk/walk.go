@@ -2,9 +2,7 @@ package walk
 
 import (
 	"archive/tar"
-	"compress/gzip"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -157,6 +155,7 @@ func (w *walker) onDirEnt(dirName, baseName string, typ os.FileMode) error {
 		return nil
 	}
 	if extArchive(joined) {
+		// unlike onTarEnt pass the file directly
 		f, err := openFile(joined)
 		if err != nil {
 			return err
@@ -192,59 +191,33 @@ func (w *walker) onTarEnt(dirName string, hdr *tar.Header, tr *tar.Reader) error
 	// TODO (CEV): maybe some of this logic should live in readArchive ???
 
 	if extArchive(hdr.Name) {
-		if extGzip(hdr.Name) {
-			gr, err := gzip.NewReader(tr)
-			if err != nil {
-				return err
-			}
-			buf, err := util.ReadAll(gr)
-			if err != nil {
-				buf.Close()
-				return err
-			}
-			w.enqueue(walkItem{dir: dirName, archive: buf})
-		} else {
-			buf, err := util.ReadAllSize(tr, hdr.Size)
-			if err != nil {
-				buf.Close()
-				return err
-			}
-			w.enqueue(walkItem{dir: dirName, archive: buf})
+		buf, err := util.ReadAllSize(tr, hdr.Size)
+		if err != nil {
+			return err
 		}
+		if extGzip(hdr.Name) {
+			gz, err := util.NewGzipReadCloser(buf)
+			if err != nil {
+				buf.Close()
+				return err
+			}
+			w.enqueue(walkItem{dir: dirName, archive: gz})
+			return nil
+		}
+		w.enqueue(walkItem{dir: dirName, archive: buf})
 		return nil
 	}
+
 	// WARN: this appears to remove the race - but is really wasteful
 	// considering we don't even know if we need the file
+	//
+	// CEV: do we want to check if we care about the file first?
 	buf, err := util.ReadAllSize(tr, hdr.Size)
 	if err != nil {
 		buf.Close()
 		return err
 	}
 	return w.fn(hdr.Name, 0, buf)
-
-	// if extArchive(hdr.Name) {
-	// 	buf, err := util.ReadAllSize(tr, hdr.Size)
-	// 	if err != nil {
-	// 		buf.Close()
-	// 		return err
-	// 	}
-	// 	if extGzip(hdr.Name) {
-	// 		// return nil
-	// 		// WARN WARN WARN - THE RACE IS HERE!!!
-	// 		gr, err := util.NewGzipReadCloser(buf)
-	// 		if err != nil {
-	// 			buf.Close()
-	// 			return err
-	// 		}
-	// 		w.enqueue(walkItem{dir: dirName, archive: gr})
-	// 		return nil
-	// 	}
-	// 	w.enqueue(walkItem{dir: dirName, archive: buf})
-	// 	return nil
-	// }
-
-	// CEV: do we want to check if we care about the file first?
-	// return w.fn(hdr.Name, 0, ioutil.NopCloser(tr))
 }
 
 func (w *walker) walk(root string, runUserCallback bool, archive io.ReadCloser) error {
@@ -264,8 +237,6 @@ func (w *walker) walk(root string, runUserCallback bool, archive io.ReadCloser) 
 }
 
 func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
-	fmt.Println("archive:", dirName) // WARN
-
 	var err error
 	tr := tar.NewReader(rc)
 	for {
@@ -276,16 +247,16 @@ func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
 			}
 			break
 		}
-		fmt.Println("  name:", hdr.Name) // WARN
 		if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
 			continue
 		}
 		// WARN: shared gzip reader may/will race
+		// TODO: continue on error?
 		if err = w.onTarEnt(dirName, hdr, tr); err != nil {
 			break
 		}
 	}
-	if e := rc.Close(); err == nil {
+	if e := rc.Close(); e != nil && err == nil {
 		err = e
 	}
 	return err
