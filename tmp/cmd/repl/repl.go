@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -520,16 +521,46 @@ func (f *FileSelection) Include(path string) bool {
 	return f.include.Len() == 0 || f.include.MatchAny(base)
 }
 
+type Config struct {
+	Recursive bool
+	Sort      bool
+	WriteJSON bool
+	NoColor   bool
+	Unique    bool
+
+	// TODO:
+	// AllLogs        bool
+	// FollowSymlinks bool
+}
+
+func (c *Config) AddFlags(set *flag.FlagSet) {
+	// TODO: use exe name - not chug!
+	const recursiveUsage = "Read all files under each directory, recursively.  " +
+		"Note that if no file operand is given, chug searches the working directory."
+
+	set.BoolVar(&c.Recursive, "recursive", false, recursiveUsage)
+	set.BoolVar(&c.Recursive, "r", false, recursiveUsage)
+
+	const sortUsage = "Sort logs by time.  May conflict with streaming logs from " +
+		"STDIN as all log entries must be read before sorting."
+	set.BoolVar(&c.Sort, "-sort", false, sortUsage)
+	set.BoolVar(&c.Sort, "s", false, sortUsage)
+
+	const jsonUsage = "Write output as JSON.  This is useful for combining multiple " +
+		"log files.  This negates any printing options."
+	set.BoolVar(&c.WriteJSON, "-json", false, jsonUsage)
+
+	set.BoolVar(&c.NoColor, "-no-color", false, "Disable colored output.")
+
+	set.BoolVar(&c.Unique, "-unique", false, "Remove duplicate log entries, implies --sort.")
+}
+
 func main() {
 	{
-		var m LagerMatcher
-		fmt.Println(m.xEmpty(true))
-		fmt.Println(m.xEmpty(false))
-
-		// m.Timestamp = new(TimeMatcher)
-		m.Source = new(PatternMatcher)
-		fmt.Println(m.xEmpty(true))
-		fmt.Println(m.xEmpty(false))
+		set := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ExitOnError)
+		var c Config
+		c.AddFlags(set)
+		set.Parse(os.Args[1:])
 		return
 	}
 
