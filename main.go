@@ -298,41 +298,9 @@ func main() {
 	}
 }
 
-type GlobSet []string
-
-func (g GlobSet) String() string {
-	return fmt.Sprintf("%v", []string(g))
-}
-
-func (g GlobSet) Get() interface{} { return []string(g) }
-
-func (g *GlobSet) Set(pattern string) error {
-	return g.Add(pattern)
-}
-
-func (g *GlobSet) Add(pattern string) error {
-	// make sure the pattern is valid
-	if _, err := filepath.Match(pattern, pattern); err != nil {
-		return err
-	}
-	*g = append(*g, pattern)
-	return nil
-}
-
-func (g GlobSet) Match(basename string) bool {
-	if len(g) == 0 {
-		return true
-	}
-	for _, p := range g {
-		if ok, _ := filepath.Match(p, basename); ok {
-			return true
-		}
-	}
-	return false
-}
-
 // WARN: make sure to add the default include pattern of '*.log*'
 type PathConfig struct {
+	allPaths   bool
 	include    GlobSet
 	exclude    GlobSet
 	excludeDir GlobSet
@@ -342,27 +310,43 @@ func (c *PathConfig) AddFlags(set *flag.FlagSet) {
 	// TODO (CEV): describe GLOB matching and describe conflicts
 	// between Exclude and Include.
 
-	const includeUsage = "Search only files whose base name matches " +
-		"GLOB using wildcard matching"
+	const includeUsage = "" +
+		"Search only files whose base name matches GLOB using wildcard matching."
 
-	const excludeUsage = "Skip files whose base name matches " +
-		"GLOB using wildcard matching."
+	const excludeUsage = "" +
+		"Skip files whose base name matches GLOB using wildcard matching."
 
-	const excludeDirUsage = "Skip directories whose base name matches " +
-		"GLOB using wildcard matching."
+	const excludeDirUsage = "" +
+		"Skip directories whose base name matches GLOB using wildcard matching."
+
+	const allPathsUsage = "" +
+		"Search all files.  Otherwise only files matching the globs '*.log' and\n" +
+		"'*.log.*.gz' are searched.  The '-include', '-exclude' and '-exclude-dir'\n" +
+		"flags are still respected."
 
 	set.Var(&c.include, "-include", includeUsage)
 	set.Var(&c.exclude, "-exclude", excludeUsage)
 	set.Var(&c.excludeDir, "-exclude-dir", excludeUsage)
+	set.BoolVar(&c.allPaths, "-all", false, allPathsUsage)
+}
+
+func (p *PathConfig) matchDefault(basename string) bool {
+	if hasSuffix(basename, ".log") {
+		return true
+	}
+	ok, _ := filepath.Match("*.log.*.gz", basename)
+	return ok
 }
 
 func (p *PathConfig) MatchFile(basename string) bool {
-	return (len(p.include) == 0 || p.include.Match(basename)) &&
-		(len(p.exclude) == 0 || !p.exclude.Match(basename))
+	if !p.allPaths && p.matchDefault(basename) {
+		return true
+	}
+	return p.include.Match(basename) && !p.exclude.Exclude(basename)
 }
 
 func (p *PathConfig) MatchDir(basename string) bool {
-	return len(p.excludeDir) == 0 || !p.excludeDir.Match(basename)
+	return p.excludeDir.Exclude(basename)
 }
 
 type Config struct {
@@ -371,6 +355,7 @@ type Config struct {
 	WriteJSON bool
 	NoColor   bool
 	Unique    bool
+	LocalTime bool
 
 	Path PathConfig
 
@@ -381,24 +366,32 @@ type Config struct {
 
 func (c *Config) AddFlags(set *flag.FlagSet) {
 	// TODO: use exe name - not chug!
-	const recursiveUsage = "Read all files under each directory, recursively.  " +
-		"Note that if no file operand is given, chug searches the working directory."
+	const recursiveUsage = "" +
+		"Read all files under each directory, recursively.  Note that if no file\n" +
+		"operand is given, chug searches the working directory."
 
 	set.BoolVar(&c.Recursive, "recursive", false, recursiveUsage)
 	set.BoolVar(&c.Recursive, "r", false, recursiveUsage)
 
-	const sortUsage = "Sort logs by time.  May conflict with streaming logs from " +
-		"STDIN as all log entries must be read before sorting."
+	const sortUsage = "" +
+		"Sort logs by time.  May conflict with streaming logs from STDIN as all\n" +
+		"log entries must be read before sorting."
+
 	set.BoolVar(&c.Sort, "-sort", false, sortUsage)
 	set.BoolVar(&c.Sort, "s", false, sortUsage)
 
-	const jsonUsage = "Write output as JSON.  This is useful for combining multiple " +
-		"log files.  This negates any printing options."
+	const jsonUsage = "" +
+		"Write output as JSON.  This is useful for combining multiple log files.\n" +
+		"This negates any printing options."
+
 	set.BoolVar(&c.WriteJSON, "-json", false, jsonUsage)
 
 	set.BoolVar(&c.NoColor, "-no-color", false, "Disable colored output.")
 
 	set.BoolVar(&c.Unique, "-unique", false, "Remove duplicate log entries, implies --sort.")
+
+	set.BoolVar(&c.LocalTime, "-local", false, "Use the local time for log timestamps.  "+
+		"By default UTC is used")
 
 	c.Path.AddFlags(set)
 }

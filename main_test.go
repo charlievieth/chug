@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"io"
 	"io/ioutil"
 	"os"
+	"regexp"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/charlievieth/chug/util"
 	"github.com/charlievieth/chug/walk"
 )
 
@@ -44,14 +47,14 @@ func BenchmarkDecode(b *testing.B) {
 	}
 }
 
-func BenchmarkDecodeFast(b *testing.B) {
-	for i := 0; i < b.N; i++ {
-		RepLogReader.Seek(0, 0)
-		if _, err := DecodeEntriesFast(RepLogReader); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
+// func BenchmarkDecodeFast(b *testing.B) {
+// 	for i := 0; i < b.N; i++ {
+// 		RepLogReader.Seek(0, 0)
+// 		if _, err := DecodeEntriesFast(RepLogReader); err != nil {
+// 			b.Fatal(err)
+// 		}
+// 	}
+// }
 
 func BenchmarkWalk(b *testing.B) {
 	const root = "/Users/charlie/Desktop/ditmars-logs/warp-drive/out_logs"
@@ -115,5 +118,64 @@ func BenchmarkEncodePretty(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		p.EncodePretty(log)
+	}
+}
+
+func benchReadLines() (int, error) {
+	RepLogReader.Seek(0, 0)
+	r := util.NewReader(RepLogReader)
+	var lines int
+	var err error
+	for {
+		b, e := r.ReadLine()
+		if len(b) != 0 {
+			lines++
+		}
+		if e != nil {
+			if e != io.EOF {
+				err = e
+			}
+			break
+		}
+	}
+	return lines, err
+}
+
+func benchCandidateLines(re *regexp.Regexp) (int, error) {
+	RepLogReader.Seek(0, 0)
+	r := util.NewReader(RepLogReader)
+	var err error
+	var lines int
+	for {
+		b, e := r.ReadLine()
+		if len(b) != 0 && re.Match(b) {
+			lines++
+		}
+		if e != nil {
+			if e != io.EOF {
+				err = e
+			}
+			break
+		}
+	}
+	return lines, err
+}
+
+func BenchmarkReadLines(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if _, err := benchReadLines(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// var candidateRe = regexp.MustCompile(`"(log_)?level":\s*(1|"info")`)
+var candidateRe = regexp.MustCompile(`level":\s*(?:[123]|"(info|error|fatal)")`)
+
+func BenchmarkCandidate(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if _, err := benchCandidateLines(candidateRe); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
