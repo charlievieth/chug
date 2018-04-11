@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -316,9 +317,9 @@ func (m *LagerMatcher) Match(e *LogEntry) bool {
 	}
 
 	// exclusive matches
-	if m.LogLevel != nil && !m.LogLevel.Match(e.LogLevel) {
-		return false
-	}
+	// if m.LogLevel != nil && !m.LogLevel.Match(e.LogLevel) {
+	// 	return false
+	// }
 	if m.Timestamp != nil && !m.Timestamp.Match(e.Timestamp) {
 		return false
 	}
@@ -378,17 +379,31 @@ func (m *TimeMatcher) Match(t time.Time) bool {
 	return true
 }
 
-// TODO: use ("(log_)?level":\s*(1|"info")) to match candidates
-type MinLogLevelMatcher LogLevel
-
-func NewMinLogLevelMatcher(v LogLevel) (MinLogLevelMatcher, error) {
-	if !v.valid() {
-		return 0, fmt.Errorf("invalid LogLevel: %d", v)
-	}
-	return MinLogLevelMatcher(v), nil
+type MinLogLevelMatcher struct {
+	min LogLevel
+	re  *regexp.Regexp
 }
 
-func (m MinLogLevelMatcher) Match(v LogLevel) bool { return v >= LogLevel(m) }
+// type MinLogLevelMatcher LogLevel
+
+func NewMinLogLevelMatcher(v LogLevel) (*MinLogLevelMatcher, error) {
+	if !v.valid() {
+		return nil, fmt.Errorf("invalid LogLevel: %d", v)
+	}
+	var intLevels []string
+	var strLevels []string
+	for i := v; i <= FATAL; i++ {
+		intLevels = append(intLevels, strconv.Itoa(int(i)))
+		strLevels = append(strLevels, i.String())
+	}
+	expr := fmt.Sprintf(`level":\s*(?:[%s]|"(%s)")`,
+		strings.Join(intLevels, "|"), strings.Join(strLevels, "|"))
+	re, err := regexp.Compile(expr)
+	if err != nil {
+		return nil, err
+	}
+	return &MinLogLevelMatcher{min: v, re: re}, nil
+}
 
 type LogLevelMatcher struct {
 	levels [FATAL + 1]bool
@@ -556,6 +571,15 @@ func (c *Config) AddFlags(set *flag.FlagSet) {
 }
 
 func main() {
+	{
+		m, err := NewMinLogLevelMatcher(INFO)
+		if err != nil {
+			Fatal(err)
+		}
+		fmt.Println(m.re.String())
+		fmt.Println(m.re.LiteralPrefix())
+		return
+	}
 	{
 		set := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ExitOnError)
 		var c Config
