@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charlievieth/chug/color"
 	"github.com/charlievieth/chug/util"
 	"github.com/charlievieth/chug/walk"
 )
@@ -232,6 +235,76 @@ func (w *Walker) EncodeJSON(filename string) error {
 //
 // See TODO section of walk/walk.go
 
+var Debugf func(format string, args ...interface{})
+
+func realMain() error {
+
+	set := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ExitOnError)
+	var conf Config
+	conf.AddFlags(set)
+	set.Usage = func() {
+		fmt.Fprintf(set.Output(), "%s USAGE: [OPTIONS] FILEPATHS...\n", set.Name())
+		set.PrintDefaults()
+	}
+
+	if err := set.Parse(os.Args[1:]); err != nil {
+		return err
+	}
+	if set.NArg() == 0 {
+		set.Usage()
+		return errors.New("missing required argument FILEPATHS...")
+	}
+
+	// TODO: move setup to Config
+	if conf.Debug {
+		ll := log.New(os.Stderr, "", log.Lshortfile|log.LstdFlags)
+		if conf.DebugColor {
+			Debugf = func(format string, args ...interface{}) {
+				ll.Print(color.ColorGreen, fmt.Sprintf(format, args...), color.StyleDefault)
+			}
+		} else {
+			Debugf = ll.Printf
+		}
+	}
+
+	numCPU := runtime.NumCPU()
+	walker := Walker{
+		reqs: make(chan WalkRequest, numCPU),
+	}
+	for i := 0; i < numCPU; i++ {
+		walker.wg.Add(1)
+		go walker.Worker()
+	}
+	for _, name := range flag.Args() {
+		if err := walk.Walk(name, walker.Walk); err != nil {
+			return fmt.Errorf("walker: %s", err)
+		}
+	}
+	close(walker.reqs)
+	walker.wg.Wait()
+
+	sort.Sort(entryByTime(walker.ents))
+
+	out := bufio.NewWriterSize(os.Stdout, 32*1024)
+	p := NewPrinter(out)
+	for _, e := range walker.ents {
+		if e.Log == nil {
+			continue // shouldn't happen
+		}
+		if err := p.EncodePretty(e.Log); err != nil {
+			Fatal(err)
+		}
+		// free resources
+		e.Log = nil
+		e.Raw = nil
+	}
+	if err := out.Flush(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 func main() {
 	if len(os.Args) != 2 {
 		Fatal("USAGE: PATH")
@@ -350,12 +423,15 @@ func (p *PathConfig) MatchDir(basename string) bool {
 }
 
 type Config struct {
-	Recursive bool
-	Sort      bool
-	WriteJSON bool
-	NoColor   bool
-	Unique    bool
-	LocalTime bool
+	Debug      bool
+	DebugColor bool
+	Recursive  bool
+	Sort       bool // TODO: change this to no-sort
+	Stream     bool
+	WriteJSON  bool
+	NoColor    bool
+	Unique     bool
+	LocalTime  bool
 
 	Path PathConfig
 
@@ -373,12 +449,19 @@ func (c *Config) AddFlags(set *flag.FlagSet) {
 	set.BoolVar(&c.Recursive, "recursive", false, recursiveUsage)
 	set.BoolVar(&c.Recursive, "r", false, recursiveUsage)
 
+	set.BoolVar(&c.Debug, "-debug", false, "Print gobs of debugging information.")
+	set.BoolVar(&c.DebugColor, "-debug-color", false, "Colorize debug output.")
+
 	const sortUsage = "" +
 		"Sort logs by time.  May conflict with streaming logs from STDIN as all\n" +
 		"log entries must be read before sorting."
 
+	// TODO: change this to no-sort
 	set.BoolVar(&c.Sort, "-sort", false, sortUsage)
 	set.BoolVar(&c.Sort, "s", false, sortUsage)
+
+	set.BoolVar(&c.Stream, "-stream", false,
+		"Treat STDIN as a stream (disables sorting, which requires reading to EOF")
 
 	const jsonUsage = "" +
 		"Write output as JSON.  This is useful for combining multiple log files.\n" +

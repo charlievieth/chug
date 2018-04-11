@@ -55,6 +55,24 @@ func Walk(root string, walkFn WalkFn) error {
 	return walkN(filepath.Clean(root), walkFn, numWorkers)
 }
 
+func isDir(name string) bool {
+	fi, err := os.Stat(name)
+	return err == nil && fi.IsDir()
+}
+
+func WalkExtra(walkFn WalkFn, roots ...string) error {
+	numWorkers := 4
+	if n := runtime.NumCPU(); n > numWorkers {
+		numWorkers = n
+	}
+	for i, s := range roots {
+		roots[i] = filepath.Clean(s)
+	}
+
+	return nil
+	// return walkN(filepath.Clean(root), walkFn, numWorkers)
+}
+
 func walkN(root string, walkFn WalkFn, numWorkers int) error {
 	w := &walker{
 		fn:       walkFn,
