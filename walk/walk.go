@@ -3,6 +3,7 @@ package walk
 import (
 	"archive/tar"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -52,15 +53,10 @@ func Walk(root string, walkFn WalkFn) error {
 	if n := runtime.NumCPU(); n > numWorkers {
 		numWorkers = n
 	}
-	return walkN(filepath.Clean(root), walkFn, numWorkers)
+	return walkN([]string{filepath.Clean(root)}, walkFn, numWorkers)
 }
 
-func isDir(name string) bool {
-	fi, err := os.Stat(name)
-	return err == nil && fi.IsDir()
-}
-
-func WalkExtra(walkFn WalkFn, roots ...string) error {
+func WalkRoots(roots []string, walkFn WalkFn) error {
 	numWorkers := 4
 	if n := runtime.NumCPU(); n > numWorkers {
 		numWorkers = n
@@ -68,12 +64,10 @@ func WalkExtra(walkFn WalkFn, roots ...string) error {
 	for i, s := range roots {
 		roots[i] = filepath.Clean(s)
 	}
-
-	return nil
-	// return walkN(filepath.Clean(root), walkFn, numWorkers)
+	return walkN(roots, walkFn, numWorkers)
 }
 
-func walkN(root string, walkFn WalkFn, numWorkers int) error {
+func walkN(roots []string, walkFn WalkFn, numWorkers int) error {
 	w := &walker{
 		fn:       walkFn,
 		enqueuec: make(chan walkItem, numWorkers), // buffered for performance
@@ -88,7 +82,11 @@ func walkN(root string, walkFn WalkFn, numWorkers int) error {
 	for i := 0; i < numWorkers; i++ {
 		go w.doWork()
 	}
-	todo := []walkItem{{dir: root}}
+	todo := make([]walkItem, len(roots))
+	for i, root := range roots {
+		todo[i] = walkItem{dir: root}
+	}
+	fmt.Println("TODO:", todo)
 	out := 0
 	for {
 		workc := w.workc
@@ -289,6 +287,7 @@ func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
 // As a special case it is permitted for dirName to be a regular file.
 //
 func (w *walker) readDir(dirName string) error {
+	fmt.Println("readDir:", dirName)
 	f, err := os.Open(dirName)
 	if err != nil {
 		return err
@@ -296,13 +295,16 @@ func (w *walker) readDir(dirName string) error {
 	list, err := f.Readdir(-1)
 	// allow regular files
 	if err != nil {
+		fmt.Println("readDir (error):", err)
 		fi, e := f.Stat()
 		f.Close()
 		if e == nil && fi.Mode().IsRegular() {
 			dir := filepath.Dir(dirName)
 			return w.onDirEnt(dir, fi.Name(), fi.Mode()&os.ModeType)
-			// return fn(dir, fi.Name(), fi.Mode()&os.ModeType)
+			// fmt.Println("OK")
+			// return w.fn(dirName, fi.Mode()&os.ModeType, nil)
 		}
+		fmt.Println("readDir (error): FUCK", err)
 		return err
 	}
 	f.Close()

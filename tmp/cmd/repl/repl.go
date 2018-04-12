@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/charlievieth/chug/color"
 )
 
 func unquoteNoEscape(b []byte) []byte {
@@ -570,7 +573,15 @@ func (c *Config) AddFlags(set *flag.FlagSet) {
 	set.BoolVar(&c.Unique, "-unique", false, "Remove duplicate log entries, implies --sort.")
 }
 
+var Debugf = func(format string, a ...interface{}) {}
+
 func main() {
+	{
+		// Debugf = log.New(os.Stderr, "\033[32m"+"debug: "+"\033[0m", 0).Printf
+		Debugf = log.New(os.Stderr, color.ColorGreen+"debug: "+color.StyleDefault, 0).Printf
+		Debugf("Hello, %s", filepath.Base(os.Args[0]))
+		return
+	}
 	{
 		m, err := NewMinLogLevelMatcher(INFO)
 		if err != nil {

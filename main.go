@@ -138,7 +138,7 @@ type WalkRequest struct {
 	rc   io.ReadCloser
 }
 
-func (w *Walker) Worker() {
+func (w *Walker) doWork() {
 	defer w.wg.Done()
 	for r := range w.reqs {
 		if err := w.Parse(r.path, r.typ, r.rc); err != nil {
@@ -224,6 +224,72 @@ func (w *Walker) EncodeJSON(filename string) error {
 	return nil
 }
 
+func RipFile(name string) ([]*LogEntry, error) {
+	f, err := util.OpenFile(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	numCPU := runtime.NumCPU()
+	if numCPU > 1 {
+		numCPU--
+	}
+	lineCh := make(chan []byte, numCPU)
+	workerEnts := make([][]*LogEntry, numCPU)
+	var wg sync.WaitGroup
+
+	for i := 0; i < numCPU; i++ {
+		wg.Add(1)
+		go func(pents *[]*LogEntry) {
+			defer wg.Done()
+			ents := make([]*LogEntry, 0, 128)
+			for b := range lineCh {
+				ent, err := ParseLogEntry(b)
+				if err != nil {
+					continue // WARN: handle
+				}
+				if !ent.Timestamp.IsZero() {
+					ents = append(ents, ent)
+				}
+			}
+			*pents = ents
+		}(&workerEnts[i])
+	}
+
+	rd := util.NewReader(f)
+	for {
+		b, e := rd.ReadLine()
+		if len(b) != 0 && maybeJSON(b) {
+			x := make([]byte, len(b))
+			copy(x, b)
+			lineCh <- x
+		}
+		if e != nil {
+			if e != io.EOF {
+				err = e
+			}
+			break
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	close(lineCh)
+	wg.Wait()
+
+	var n int
+	for _, a := range workerEnts {
+		n += len(a)
+	}
+	all := make([]*LogEntry, 0, n)
+	for _, a := range workerEnts {
+		all = append(all, a...)
+	}
+	return all, nil
+}
+
 // TODO:
 //  - strip ANSI escape sequences
 //  - allow source colors to be set via the environment using a JSON map[string]string.
@@ -236,68 +302,103 @@ func (w *Walker) EncodeJSON(filename string) error {
 // See TODO section of walk/walk.go
 
 var Debugf func(format string, args ...interface{})
+var Debugln func(args ...interface{})
 
 func realMain() error {
 
 	set := flag.NewFlagSet(filepath.Base(os.Args[0]), flag.ExitOnError)
-	var conf Config
-	conf.AddFlags(set)
 	set.Usage = func() {
 		fmt.Fprintf(set.Output(), "%s USAGE: [OPTIONS] FILEPATHS...\n", set.Name())
 		set.PrintDefaults()
 	}
 
+	var conf Config
+	conf.AddFlags(set)
+
 	if err := set.Parse(os.Args[1:]); err != nil {
 		return err
 	}
+	// TODO: move setup to Config
+	if conf.Debug {
+		prefix := "debug: "
+		if conf.DebugColor {
+			prefix = color.ColorGreen + prefix + color.StyleDefault
+		}
+		ll := log.New(os.Stderr, prefix, 0)
+		Debugf = ll.Printf
+		Debugln = ll.Println
+	}
+
+	Debugf("arguments: %s", set.Args())
+	// TODO: stream
 	if set.NArg() == 0 {
 		set.Usage()
 		return errors.New("missing required argument FILEPATHS...")
 	}
 
-	// TODO: move setup to Config
-	if conf.Debug {
-		ll := log.New(os.Stderr, "", log.Lshortfile|log.LstdFlags)
-		if conf.DebugColor {
-			Debugf = func(format string, args ...interface{}) {
-				ll.Print(color.ColorGreen, fmt.Sprintf(format, args...), color.StyleDefault)
-			}
-		} else {
-			Debugf = ll.Printf
-		}
-	}
-
-	numCPU := runtime.NumCPU()
-	walker := Walker{
-		reqs: make(chan WalkRequest, numCPU),
-	}
-	for i := 0; i < numCPU; i++ {
-		walker.wg.Add(1)
-		go walker.Worker()
-	}
-	for _, name := range flag.Args() {
-		if err := walk.Walk(name, walker.Walk); err != nil {
-			return fmt.Errorf("walker: %s", err)
-		}
-	}
-	close(walker.reqs)
-	walker.wg.Wait()
-
-	sort.Sort(entryByTime(walker.ents))
-
 	out := bufio.NewWriterSize(os.Stdout, 32*1024)
 	p := NewPrinter(out)
-	for _, e := range walker.ents {
-		if e.Log == nil {
-			continue // shouldn't happen
+
+	// TODO: make sure the arg is a file!!!
+	if set.NArg() == 1 {
+		name := set.Arg(0)
+		Debugln("ripping file:", name)
+		t := time.Now()
+		start := t
+		ents, err := RipFile(name)
+		if err != nil {
+			return err
 		}
-		if err := p.EncodePretty(e.Log); err != nil {
-			Fatal(err)
+		Debugln("ripping complete:", len(ents), time.Since(t))
+
+		t = time.Now()
+		sort.Sort(logByTime(ents))
+		Debugln("sort complete:", len(ents), time.Since(t))
+
+		t = time.Now()
+		for i := 0; i < len(ents); i++ {
+			if err := p.EncodePretty(ents[i]); err != nil {
+				Fatal(err)
+			}
+			ents[i] = nil
 		}
-		// free resources
-		e.Log = nil
-		e.Raw = nil
+		Debugln("print complete:", time.Since(t))
+		Debugln("total:", time.Since(start))
+
+	} else {
+		numCPU := runtime.NumCPU()
+		walker := Walker{
+			reqs: make(chan WalkRequest, numCPU),
+		}
+		for i := 0; i < numCPU; i++ {
+			walker.wg.Add(1)
+			go walker.doWork()
+		}
+		for _, name := range set.Args() {
+			Debugf("walking (start): %s", name)
+			if err := walk.Walk(name, walker.Walk); err != nil {
+				return fmt.Errorf("walker: %s", err)
+			}
+			Debugf("walking (done): %s", name)
+		}
+		close(walker.reqs)
+		walker.wg.Wait()
+
+		sort.Sort(entryByTime(walker.ents))
+
+		for _, e := range walker.ents {
+			if e.Log == nil {
+				continue // shouldn't happen
+			}
+			if err := p.EncodePretty(e.Log); err != nil {
+				Fatal(err)
+			}
+			// free resources
+			e.Log = nil
+			e.Raw = nil
+		}
 	}
+
 	if err := out.Flush(); err != nil {
 		return err
 	}
@@ -305,6 +406,13 @@ func realMain() error {
 	return nil
 }
 
+func main() {
+	if err := realMain(); err != nil {
+		Fatal(err)
+	}
+}
+
+/*
 func main() {
 	if len(os.Args) != 2 {
 		Fatal("USAGE: PATH")
@@ -320,7 +428,7 @@ func main() {
 		}
 		for i := 0; i < 8; i++ {
 			x.wg.Add(1)
-			go x.Worker()
+			go x.doWork()
 		}
 
 		fmt.Fprintln(os.Stderr, "walk start")
@@ -338,15 +446,15 @@ func main() {
 		d = time.Since(t)
 		fmt.Fprintln(os.Stderr, "sort done:", d, d/time.Duration(len(x.ents)))
 
-		// {
-		// 	fmt.Fprintln(os.Stderr, "json start")
-		// 	if err := x.EncodeJSON("out.json"); err != nil {
-		// 		Fatal(err)
-		// 	}
-		// 	d = time.Since(start)
-		// 	fmt.Fprintln(os.Stderr, "json done:", d, d/time.Duration(len(x.ents)))
-		// 	return
-		// }
+		{
+			fmt.Fprintln(os.Stderr, "json start")
+			if err := x.EncodeJSON("out.json"); err != nil {
+				Fatal(err)
+			}
+			d = time.Since(start)
+			fmt.Fprintln(os.Stderr, "json done:", d, d/time.Duration(len(x.ents)))
+			return
+		}
 
 		fmt.Fprintln(os.Stderr, "print start")
 		t = time.Now()
@@ -370,6 +478,7 @@ func main() {
 		return
 	}
 }
+*/
 
 // WARN: make sure to add the default include pattern of '*.log*'
 type PathConfig struct {
@@ -449,31 +558,31 @@ func (c *Config) AddFlags(set *flag.FlagSet) {
 	set.BoolVar(&c.Recursive, "recursive", false, recursiveUsage)
 	set.BoolVar(&c.Recursive, "r", false, recursiveUsage)
 
-	set.BoolVar(&c.Debug, "-debug", false, "Print gobs of debugging information.")
-	set.BoolVar(&c.DebugColor, "-debug-color", false, "Colorize debug output.")
+	set.BoolVar(&c.Debug, "debug", false, "Print gobs of debugging information.")
+	set.BoolVar(&c.DebugColor, "debug-color", false, "Colorize debug output.")
 
 	const sortUsage = "" +
 		"Sort logs by time.  May conflict with streaming logs from STDIN as all\n" +
 		"log entries must be read before sorting."
 
 	// TODO: change this to no-sort
-	set.BoolVar(&c.Sort, "-sort", false, sortUsage)
+	set.BoolVar(&c.Sort, "sort", false, sortUsage)
 	set.BoolVar(&c.Sort, "s", false, sortUsage)
 
-	set.BoolVar(&c.Stream, "-stream", false,
+	set.BoolVar(&c.Stream, "stream", false,
 		"Treat STDIN as a stream (disables sorting, which requires reading to EOF")
 
 	const jsonUsage = "" +
 		"Write output as JSON.  This is useful for combining multiple log files.\n" +
 		"This negates any printing options."
 
-	set.BoolVar(&c.WriteJSON, "-json", false, jsonUsage)
+	set.BoolVar(&c.WriteJSON, "json", false, jsonUsage)
 
-	set.BoolVar(&c.NoColor, "-no-color", false, "Disable colored output.")
+	set.BoolVar(&c.NoColor, "no-color", false, "Disable colored output.")
 
-	set.BoolVar(&c.Unique, "-unique", false, "Remove duplicate log entries, implies --sort.")
+	set.BoolVar(&c.Unique, "unique", false, "Remove duplicate log entries, implies --sort.")
 
-	set.BoolVar(&c.LocalTime, "-local", false, "Use the local time for log timestamps.  "+
+	set.BoolVar(&c.LocalTime, "local", false, "Use the local time for log timestamps.  "+
 		"By default UTC is used")
 
 	c.Path.AddFlags(set)

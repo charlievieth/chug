@@ -217,6 +217,12 @@ func ParseLogEntry(b []byte) (*LogEntry, error) {
 	return ent, nil
 }
 
+type logByTime []*LogEntry
+
+func (e logByTime) Len() int           { return len(e) }
+func (e logByTime) Swap(i, j int)      { e[i], e[j] = e[j], e[i] }
+func (e logByTime) Less(i, j int) bool { return e[i].Timestamp.Before(e[j].Timestamp) }
+
 // CEV: Idea for lightweight sorting and parsing
 // type MinimalLog struct {
 // 	Timestamp Timestamp         `json:"timestamp"`
