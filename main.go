@@ -230,10 +230,27 @@ func RipFile(name string) ([]*LogEntry, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return RipN(f, runtime.NumCPU())
+}
 
-	numCPU := runtime.NumCPU()
-	if numCPU > 1 {
-		numCPU--
+func ripWorker(wg *sync.WaitGroup, lines <-chan []byte, out *[]*LogEntry) {
+	defer wg.Done()
+	ents := make([]*LogEntry, 0, 128)
+	for b := range lines {
+		ent, err := ParseLogEntry(b)
+		if err != nil || ent.Timestamp.IsZero() {
+			continue
+		}
+		ents = append(ents, ent)
+	}
+	*out = ents
+}
+
+func RipN(rc io.ReadCloser, numCPU int) ([]*LogEntry, error) {
+	defer rc.Close()
+
+	if numCPU < 1 {
+		numCPU = 1
 	}
 	lineCh := make(chan []byte, numCPU)
 	workerEnts := make([][]*LogEntry, numCPU)
@@ -257,7 +274,8 @@ func RipFile(name string) ([]*LogEntry, error) {
 		}(&workerEnts[i])
 	}
 
-	rd := util.NewReader(f)
+	rd := util.NewReader(rc)
+	var err error
 	for {
 		b, e := rd.ReadLine()
 		if len(b) != 0 && maybeJSON(b) {
@@ -272,11 +290,11 @@ func RipFile(name string) ([]*LogEntry, error) {
 			break
 		}
 	}
+	close(lineCh)
+
 	if err != nil {
 		return nil, err
 	}
-
-	close(lineCh)
 	wg.Wait()
 
 	var n int
@@ -301,8 +319,13 @@ func RipFile(name string) ([]*LogEntry, error) {
 //
 // See TODO section of walk/walk.go
 
-var Debugf func(format string, args ...interface{})
-var Debugln func(args ...interface{})
+var Debugf = func(format string, args ...interface{}) {}
+var Debugln = func(args ...interface{}) {}
+
+func isDir(name string) bool {
+	fi, err := os.Stat(name)
+	return err == nil && fi.IsDir()
+}
 
 func realMain() error {
 
@@ -340,7 +363,7 @@ func realMain() error {
 	p := NewPrinter(out)
 
 	// TODO: make sure the arg is a file!!!
-	if set.NArg() == 1 {
+	if set.NArg() == 1 && !isDir(set.Arg(0)) {
 		name := set.Arg(0)
 		Debugln("ripping file:", name)
 		t := time.Now()
@@ -356,13 +379,24 @@ func realMain() error {
 		Debugln("sort complete:", len(ents), time.Since(t))
 
 		t = time.Now()
-		for i := 0; i < len(ents); i++ {
-			if err := p.EncodePretty(ents[i]); err != nil {
-				Fatal(err)
+		if conf.WriteJSON {
+			enc := json.NewEncoder(out)
+			for i := 0; i < len(ents); i++ {
+				if err := enc.Encode(ents[i]); err != nil {
+					return err
+				}
+				ents[i] = nil
 			}
-			ents[i] = nil
+			Debugln("json complete:", time.Since(t))
+		} else {
+			for i := 0; i < len(ents); i++ {
+				if err := p.EncodePretty(ents[i]); err != nil {
+					return err
+				}
+				ents[i] = nil
+			}
+			Debugln("print complete:", time.Since(t))
 		}
-		Debugln("print complete:", time.Since(t))
 		Debugln("total:", time.Since(start))
 
 	} else {
@@ -386,16 +420,31 @@ func realMain() error {
 
 		sort.Sort(entryByTime(walker.ents))
 
-		for _, e := range walker.ents {
-			if e.Log == nil {
-				continue // shouldn't happen
+		if conf.WriteJSON {
+			enc := json.NewEncoder(out)
+			for _, e := range walker.ents {
+				if e.Log == nil {
+					continue // shouldn't happen
+				}
+				if err := enc.Encode(e.Log); err != nil {
+					return err
+				}
+				// free resources
+				e.Log = nil
+				e.Raw = nil
 			}
-			if err := p.EncodePretty(e.Log); err != nil {
-				Fatal(err)
+		} else {
+			for _, e := range walker.ents {
+				if e.Log == nil {
+					continue // shouldn't happen
+				}
+				if err := p.EncodePretty(e.Log); err != nil {
+					return err
+				}
+				// free resources
+				e.Log = nil
+				e.Raw = nil
 			}
-			// free resources
-			e.Log = nil
-			e.Raw = nil
 		}
 	}
 
@@ -586,10 +635,6 @@ func (c *Config) AddFlags(set *flag.FlagSet) {
 		"By default UTC is used")
 
 	c.Path.AddFlags(set)
-}
-
-func (c *Config) Walk(root string) error {
-	return nil
 }
 
 func PrintJSON(v interface{}) error {

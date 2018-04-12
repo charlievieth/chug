@@ -139,8 +139,7 @@ func (w *walker) doWork() {
 }
 
 type walker struct {
-	fn func(path string, typ os.FileMode, rc io.ReadCloser) error
-
+	fn       WalkFn
 	donec    chan struct{} // closed on Walk's return
 	workc    chan walkItem // to workers
 	enqueuec chan walkItem // from workers

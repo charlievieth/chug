@@ -106,7 +106,13 @@ type Reader struct {
 }
 
 func NewReader(rd io.Reader) *Reader {
-	return &Reader{b: bufio.NewReaderSize(rd, defaultBufSize)}
+	var buf *bufio.Reader
+	if b, ok := rd.(*bufio.Reader); ok && b != nil {
+		buf = b
+	} else {
+		buf = bufio.NewReaderSize(rd, defaultBufSize)
+	}
+	return &Reader{b: buf}
 }
 
 func (r *Reader) Reset(rd io.Reader) {
