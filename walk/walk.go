@@ -3,7 +3,6 @@ package walk
 import (
 	"archive/tar"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,11 +10,6 @@ import (
 
 	"github.com/charlievieth/chug/util"
 )
-
-// RACE RACE RACE RACE
-//   Looks like we're racing on the gzip reader - likely due to
-//   mutliple threads trying to access it - this is umm bad...
-// RACE RACE RACE RACE
 
 // TODO:
 //  - Add files to walk (dirs and regular files)
@@ -43,12 +37,6 @@ type WalkFn func(path string, typ os.FileMode, rc io.ReadCloser) error
 //     sentinel error. It is the walkFn's responsibility to prevent
 //     Walk from going into symlink cycles.
 func Walk(root string, walkFn WalkFn) error {
-	// TODO(bradfitz): make numWorkers configurable? We used a
-	// minimum of 4 to give the kernel more info about multiple
-	// things we want, in hopes its I/O scheduling can take
-	// advantage of that. Hopefully most are in cache. Maybe 4 is
-	// even too low of a minimum. Profile more.
-	//
 	numWorkers := 4
 	if n := runtime.NumCPU(); n > numWorkers {
 		numWorkers = n
@@ -78,7 +66,6 @@ func walkN(roots []string, walkFn WalkFn, numWorkers int) error {
 		resc: make(chan error, numWorkers),
 	}
 	defer close(w.donec)
-	// TODO(bradfitz): start the workers as needed? maybe not worth it.
 	for i := 0; i < numWorkers; i++ {
 		go w.doWork()
 	}
@@ -86,7 +73,6 @@ func walkN(roots []string, walkFn WalkFn, numWorkers int) error {
 	for i, root := range roots {
 		todo[i] = walkItem{dir: root}
 	}
-	fmt.Println("TODO:", todo)
 	out := 0
 	for {
 		workc := w.workc
@@ -265,8 +251,7 @@ func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
 		if hdr.Typeflag != tar.TypeReg || hdr.Size == 0 {
 			continue
 		}
-		// WARN: shared gzip reader may/will race
-		// TODO: continue on error?
+		// careful, onTarEnt needs to ensure we don't share the reader
 		if err = w.onTarEnt(dirName, hdr, tr); err != nil {
 			break
 		}
@@ -277,8 +262,6 @@ func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
 	return err
 }
 
-// TODO (CEV): Remove logic for handling files - that should be done elsewhere.
-//
 // readDir calls fn for each directory entry in dirName. It does not descend
 // into directories or follow symlinks. If fn returns a non-nil error, readDir
 // returns with that error immediately.
@@ -286,28 +269,22 @@ func (w *walker) readArchive(dirName string, rc io.ReadCloser) error {
 // As a special case it is permitted for dirName to be a regular file.
 //
 func (w *walker) readDir(dirName string) error {
-	fmt.Println("readDir:", dirName)
 	f, err := os.Open(dirName)
 	if err != nil {
 		return err
 	}
 	list, err := f.Readdir(-1)
-	// allow regular files
+	// check if dirName is a regular file
 	if err != nil {
-		fmt.Println("readDir (error):", err)
 		fi, e := f.Stat()
 		f.Close()
 		if e == nil && fi.Mode().IsRegular() {
 			dir := filepath.Dir(dirName)
 			return w.onDirEnt(dir, fi.Name(), fi.Mode()&os.ModeType)
-			// fmt.Println("OK")
-			// return w.fn(dirName, fi.Mode()&os.ModeType, nil)
 		}
-		fmt.Println("readDir (error): FUCK", err)
 		return err
 	}
 	f.Close()
-
 	for _, fi := range list {
 		if err := w.onDirEnt(dirName, fi.Name(), fi.Mode()&os.ModeType); err != nil {
 			return err

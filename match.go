@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -92,6 +93,60 @@ type LagerMatcher struct {
 	Data      PatternSet
 }
 
+type TimeFlag time.Time
+
+func (t TimeFlag) String() string  { return t.String() }
+func (t TimeFlag) Time() time.Time { return time.Time(t) }
+func (t TimeFlag) Get() TimeFlag   { return TimeFlag(t) }
+
+func (t *TimeFlag) Set(s string) error {
+	// this is for parsing flags so performance doesn't matter
+	const (
+		unixExpr = `\d+(\.\d*)?`
+		durExpr  = `[-+]?([0-9]*(\.[0-9]*)?[a-z]+)+`
+		timeExpr = `\d{2}/\d{2} \d{2}:\d{2}:\d{2}(\.\d{0,2})?`
+	)
+	match := func(pattern, s string) bool {
+		return regexp.MustCompile(pattern).MatchString(s)
+	}
+	switch {
+	case match(unixExpr, s):
+		ff, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return fmt.Errorf("invalid unix timestamp (%s): %s", s, err)
+		}
+		sec := int64(math.Ceil(ff))
+		nsec := int64((ff - float64(sec)*1e9))
+		*t = TimeFlag(time.Unix(sec, nsec))
+
+	case match(durExpr, s):
+		dur, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid time duration (%s): %s", s, err)
+		}
+		*t = TimeFlag(time.Now().Add(dur))
+
+	case match(timeExpr, s):
+		tt, err := time.Parse("01/02 15:04:05.00", s)
+		if err != nil {
+			return fmt.Errorf("invalid time (%s): %s", s, err)
+		}
+		*t = TimeFlag(tt)
+
+	default:
+		// check for the RFC3339 Go uses with JSON
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			tt, err := time.Parse(layout, s)
+			if err == nil {
+				*t = TimeFlag(tt)
+				return nil
+			}
+		}
+		return fmt.Errorf("invalid time layout: %s", s)
+	}
+	return nil
+}
+
 type TimeMatcher struct {
 	Min, Max time.Time
 }
@@ -153,13 +208,6 @@ func (m MinLogLevelMatcher) Candidate(line []byte) bool { return m.re.Match(line
 
 func isRegex(s string) bool { return strings.ContainsAny(s, "$()*+.?[\\]^{|}") }
 
-// ^              at beginning of text or line (flag m=true)
-// $              at end of text (like \z not Perl's \Z) or line (flag m=true)
-// \A             at beginning of text
-// \b             at ASCII word boundary (\w on one side and \W, \A, or \z on the other)
-// \B             not at ASCII word boundary
-// \z             at end of text
-
 type PatternMatcher struct {
 	expr  string
 	bexpr []byte
@@ -181,6 +229,15 @@ func NewPatternMatcher(expr string) (*PatternMatcher, error) {
 		re:    re,
 	}
 	return m, nil
+}
+
+func (m *PatternMatcher) Candidate(b []byte) bool {
+	if m.re != nil {
+		if prefix, ok := m.re.LiteralPrefix(); ok && prefix != "" {
+			return bytes.Contains(b, []byte(prefix))
+		}
+	}
+	return true
 }
 
 func (m *PatternMatcher) Match(b []byte) bool {
