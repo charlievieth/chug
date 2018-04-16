@@ -90,33 +90,56 @@ func (t Timestamp) Time() time.Time              { return time.Time(t) }
 func (t Timestamp) String() string               { return time.Time(t).String() }
 func (t Timestamp) MarshalJSON() ([]byte, error) { return time.Time(t).MarshalJSON() }
 
-// TODO: we rely upon and lager uses a 9 digit nanosecond timestamp the
-// current implementation is incorrect and can be simplified by checking
-// for the decimal seperator with S[len(s)-9] (approximately).
 func parseUnixTimestamp(b []byte) (time.Time, bool) {
 	// N.B. I was a bored when I wrote this so its a bit over-optimized.
-	var dot bool
-	var nsec int64
+	var (
+		dot  int
+		sec  int64
+		nsec int64
+	)
+	p := &sec
 	if len(b) == 0 || !('1' <= b[0] && b[0] <= '9') {
 		goto Error
 	}
-	for _, c := range b {
+	for i, c := range b {
 		switch {
 		case '0' <= c && c <= '9':
-			nsec = nsec*10 + int64(c-'0')
-		case c == '.' && !dot:
-			dot = true
+			*p = *p*10 + int64(c-'0')
+		case c == '.' && dot == 0:
+			dot = i
+			p = &nsec
 		default:
 			goto Error
 		}
 	}
-	if !dot {
-		nsec *= 1e9
+	if dot == len(b)-1 {
+		goto Error // trailing dot: "123."
 	}
-	return time.Unix(0, nsec), true
+	// convert nsec fraction to nanoseconds
+	dot = 9 - (len(b) - (dot + 1))
+	if dot < 0 {
+		goto Error
+	}
+	if dot > 0 {
+		nsec *= pow10tab[dot]
+	}
+	return time.Unix(sec, nsec), true
 
 Error:
 	return time.Time{}, false
+}
+
+var pow10tab = [...]int64{
+	0: 1e00,
+	1: 1e01,
+	2: 1e02,
+	3: 1e03,
+	4: 1e04,
+	5: 1e05,
+	6: 1e06,
+	7: 1e07,
+	8: 1e08,
+	9: 1e09,
 }
 
 func (t *Timestamp) UnmarshalJSON(data []byte) error {
