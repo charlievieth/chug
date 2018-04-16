@@ -1,6 +1,8 @@
 package main
 
 import (
+	"math"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -52,6 +54,22 @@ var timestampTests = []timestampTest{
 		Stamp:   "1.00.",
 		Invalid: true,
 	},
+	{
+		Stamp:   "1.1234567899",
+		Invalid: true,
+	},
+	{
+		Stamp:   strconv.FormatUint(math.MaxUint64, 10),
+		Invalid: true,
+	},
+	{
+		Stamp:   "1." + strconv.FormatUint(math.MaxUint64, 10),
+		Invalid: true,
+	},
+	{
+		Stamp:   strconv.FormatUint(math.MaxUint64, 10) + "." + strconv.FormatUint(math.MaxUint64, 10),
+		Invalid: true,
+	},
 }
 
 func TestParseUnixTimestamp(t *testing.T) {
@@ -61,6 +79,10 @@ func TestParseUnixTimestamp(t *testing.T) {
 			if !x.Invalid {
 				t.Errorf("ParseUnixTimestamp (%s): want: invalid timestamp got: %s", x.Stamp, ts)
 			}
+			continue
+		}
+		if x.Invalid {
+			t.Errorf("ParseUnixTimestamp (%s): want: invalid timestamp got: %s", x.Stamp, ts)
 			continue
 		}
 		if !x.Time.Equal(ts) {
