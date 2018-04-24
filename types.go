@@ -90,6 +90,8 @@ func (t Timestamp) Time() time.Time              { return time.Time(t) }
 func (t Timestamp) String() string               { return time.Time(t).String() }
 func (t Timestamp) MarshalJSON() ([]byte, error) { return time.Time(t).MarshalJSON() }
 
+var pow10tab = [...]int64{1e00, 1e01, 1e02, 1e03, 1e04, 1e05, 1e06, 1e07, 1e08, 1e09}
+
 func parseUnixTimestamp(b []byte) (time.Time, bool) {
 	// N.B. I was a bored when I wrote this so its a bit over-optimized.
 	var (
@@ -127,19 +129,6 @@ func parseUnixTimestamp(b []byte) (time.Time, bool) {
 
 Error:
 	return time.Time{}, false
-}
-
-var pow10tab = [...]int64{
-	0: 1e00,
-	1: 1e01,
-	2: 1e02,
-	3: 1e03,
-	4: 1e04,
-	5: 1e05,
-	6: 1e06,
-	7: 1e07,
-	8: 1e08,
-	9: 1e09,
 }
 
 func (t *Timestamp) UnmarshalJSON(data []byte) error {
