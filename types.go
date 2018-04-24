@@ -147,30 +147,45 @@ func (t *Timestamp) UnmarshalJSON(data []byte) error {
 }
 
 type CombinedFormat struct {
-	Timestamp Timestamp                  `json:"timestamp"`
-	Source    string                     `json:"source"`
-	Message   string                     `json:"message"`
-	LevelV1   LogLevel                   `json:"log_level"`
-	LevelV2   LogLevel                   `json:"level"`
-	Data      map[string]json.RawMessage `json:"data,omitempty"` // lazily parsed
+	Timestamp Timestamp `json:"timestamp"`
+	Source    string    `json:"source"`
+	Message   string    `json:"message"`
+	LevelV1   LogLevel  `json:"log_level"`
+	LevelV2   LogLevel  `json:"level"`
+
+	// We only care about the 'session', 'error' and 'trace' fields,
+	// which are strings.  By using type map[string]json.RawMessage
+	// we avoid parsing more complex fields.
+	Data map[string]json.RawMessage `json:"data,omitempty"`
+
+	// These fields are added by chug when combining logs.
+	Session string `json:"session,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Trace   string `json:"trace,omitempty"`
 }
 
 func (c *CombinedFormat) LogLevel() LogLevel {
-	if c.LevelV1 > c.LevelV2 {
+	if c.LevelV1 >= c.LevelV2 {
 		return c.LevelV1
 	}
 	return c.LevelV2
 }
 
 type LogEntry struct {
-	Timestamp time.Time
-	LogLevel  LogLevel
-	Source    string
-	Message   string
-	Session   string
-	Error     string
-	Trace     string
-	Data      json.RawMessage // lazily parsed
+	Timestamp time.Time `json:"timestamp"`
+	LogLevel  LogLevel  `json:"log_level"`
+	Source    string    `json:"source"`
+	Message   string    `json:"message"`
+
+	// The 'session', 'error' and 'trace' fields are extracted from the 'data'
+	// field of the lager log message.
+	Session string `json:"session,omitempty"`
+	Error   string `json:"error,omitempty"`
+	Trace   string `json:"trace,omitempty"`
+
+	// The JSON encoded lager 'data' field with the 'session', 'error' and
+	// 'trace' fields removed.
+	Data json.RawMessage `json:"data,omitempty"`
 }
 
 func (l *LogEntry) Equal(e *LogEntry) bool {
@@ -196,21 +211,27 @@ func extractStringValue(m map[string]json.RawMessage, key string) string {
 	return ""
 }
 
+func valueOrDefault(value, def string) string {
+	if value != "" {
+		return value
+	}
+	return def
+}
+
 // TODO: this should only be used when handling a very large number of entries
 func ParseLogEntry(b []byte) (*LogEntry, error) {
 	var log CombinedFormat
 	if err := json.Unmarshal(b, &log); err != nil {
 		return nil, err
 	}
-
 	ent := &LogEntry{
 		Timestamp: log.Timestamp.Time(),
 		LogLevel:  log.LogLevel(),
 		Source:    log.Source,
 		Message:   log.Message,
-		Session:   extractStringValue(log.Data, "session"),
-		Trace:     extractStringValue(log.Data, "trace"),
-		Error:     extractStringValue(log.Data, "error"),
+		Session:   valueOrDefault(log.Session, extractStringValue(log.Data, "session")),
+		Trace:     valueOrDefault(log.Trace, extractStringValue(log.Data, "trace")),
+		Error:     valueOrDefault(log.Error, extractStringValue(log.Data, "error")),
 	}
 	if len(log.Data) != 0 {
 		// This is a significant source of memory usage.  Go allocates
@@ -222,9 +243,60 @@ func ParseLogEntry(b []byte) (*LogEntry, error) {
 			util.PutBuffer(buf)
 			return nil, err
 		}
+		buf.UnreadByte() // remove new line
 		ent.Data = make([]byte, buf.Len())
 		copy(ent.Data, buf.Bytes())
 		util.PutBuffer(buf)
+	}
+	return ent, nil
+}
+
+type LogEntryDecoder struct {
+	buf          bytes.Buffer
+	enc          *json.Encoder
+	indentPrefix string
+	indentValue  string
+}
+
+func (p *LogEntryDecoder) lazyInit() {
+	if p.enc == nil {
+		p.enc = json.NewEncoder(&p.buf)
+		p.enc.SetEscapeHTML(false)
+	}
+}
+
+func (p *LogEntryDecoder) SetIndent(prefix, indent string) {
+	p.lazyInit()
+	p.indentPrefix = prefix
+	p.indentValue = indent
+	p.enc.SetIndent(prefix, indent)
+}
+
+func (p *LogEntryDecoder) Decode(b []byte) (*LogEntry, error) {
+	p.lazyInit()
+	var log CombinedFormat
+	if err := json.Unmarshal(b, &log); err != nil {
+		return nil, err
+	}
+	ent := &LogEntry{
+		Timestamp: log.Timestamp.Time(),
+		LogLevel:  log.LogLevel(),
+		Source:    log.Source,
+		Message:   log.Message,
+		Session:   valueOrDefault(log.Session, extractStringValue(log.Data, "session")),
+		Trace:     valueOrDefault(log.Trace, extractStringValue(log.Data, "trace")),
+		Error:     valueOrDefault(log.Error, extractStringValue(log.Data, "error")),
+	}
+	if len(log.Data) != 0 {
+		p.buf.Reset()
+		if err := p.enc.Encode(log.Data); err != nil {
+			// The json.Encoder's internall err field is only set on write
+			// errors - so we don't need to create a new one.
+			return nil, err
+		}
+		p.buf.UnreadByte() // Remove newline
+		ent.Data = make([]byte, p.buf.Len())
+		copy(ent.Data, p.buf.Bytes())
 	}
 	return ent, nil
 }
