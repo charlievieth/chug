@@ -8,7 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"syscall"
 	"testing"
+	"time"
 )
 
 var xzNotFound bool
@@ -61,6 +63,7 @@ func TestXZ(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer xz.Close()
 	received, err := ioutil.ReadAll(xz)
 	if err != nil {
 		t.Fatal(err)
@@ -75,6 +78,61 @@ func TestXZ(t *testing.T) {
 		ioutil.WriteFile(filepath.Join(dir, "received_content.log"), received, 0644)
 		t.Fatalf("xz decompressed content did not match expected content.\n"+
 			"The expected and received contents were saved to %q for comparison.", dir)
+	}
+}
+
+func pidExists(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil { // non-unix only
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+func TestClose(t *testing.T) {
+	if xzNotFound {
+		t.Skip("xz required for tests")
+	}
+	xz, err := NewReader(bytes.NewReader(testData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := xz.Read(make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
+	pid := xz.cmd.Process.Pid
+	if !pidExists(pid) {
+		t.Errorf("invalid process pid: %d", pid)
+	}
+	if err := xz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := xz.Read(make([]byte, 1)); err != io.ErrClosedPipe {
+		t.Fatal(err)
+	}
+	for i := 0; i < 500; i++ {
+		if !pidExists(pid) {
+			return
+		}
+		time.Sleep(time.Millisecond * 10)
+	}
+	t.Error("closing the xz reader should have terminated the process,\n" +
+		"timed out waiting for the process to exit after 5 seconds")
+}
+
+func TestCloseNoStart(t *testing.T) {
+	if xzNotFound {
+		t.Skip("xz required for tests")
+	}
+	xz, err := NewReader(bytes.NewReader(testData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := xz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := xz.Read(make([]byte, 1)); err != io.ErrClosedPipe {
+		t.Fatal(err)
 	}
 }
 
@@ -93,6 +151,7 @@ func BenchmarkXZ(b *testing.B) {
 			b.Fatal(err)
 		}
 		if _, err := io.CopyBuffer(w, r, buf); err != nil {
+			r.Close()
 			b.Fatal(err)
 		}
 	}
@@ -113,6 +172,7 @@ func BenchmarkXZParallel(b *testing.B) {
 				b.Fatal(err)
 			}
 			if _, err := io.CopyBuffer(w, r, buf); err != nil {
+				r.Close()
 				b.Fatal(err)
 			}
 		}

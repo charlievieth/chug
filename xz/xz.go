@@ -59,6 +59,7 @@ func validateXZ() {
 		base64.StdEncoding,
 		strings.NewReader(testMessage)),
 	)
+	defer r.Close()
 	h := sha1.New()
 	if _, err := io.CopyBuffer(h, r, make([]byte, 64)); err != nil {
 		xzValidationErr = &ValidationError{Op: "copy", Err: err}
@@ -76,11 +77,13 @@ func validateXZ() {
 }
 
 type Reader struct {
-	cmd    *exec.Cmd
-	pr     *io.PipeReader
-	pw     *io.PipeWriter
-	once   sync.Once
-	stderr bytes.Buffer
+	cmd       *exec.Cmd
+	pr        *io.PipeReader
+	pw        *io.PipeWriter
+	initOnce  sync.Once
+	closeOnce sync.Once
+	stderr    bytes.Buffer
+	done      chan struct{} // used to abort the process
 }
 
 func NewReader(rd io.Reader) (*Reader, error) {
@@ -98,35 +101,55 @@ func newReader(rd io.Reader) *Reader {
 	cmd.Stdin = rd
 	cmd.Stdout = pw
 	xz := &Reader{
-		cmd: cmd,
-		pr:  pr,
-		pw:  pw,
+		cmd:  cmd,
+		pr:   pr,
+		pw:   pw,
+		done: make(chan struct{}),
 	}
 	cmd.Stderr = &xz.stderr
 	return xz
 }
 
 func (r *Reader) wait() {
-	err := r.cmd.Wait()
-	if err != nil {
-		err = fmt.Errorf("runtime error: %s: %s", err,
-			strings.TrimSpace(r.stderr.String()))
+	errCh := make(chan error, 1)
+	go func() { errCh <- r.cmd.Wait() }()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			err = fmt.Errorf("runtime error: %s: %s", err,
+				strings.TrimSpace(r.stderr.String()))
+		}
+		r.pw.CloseWithError(err)
+	case <-r.done:
+		r.cmd.Process.Kill()
 	}
-	r.pw.CloseWithError(err)
 }
 
 func (r *Reader) lazyInit() {
-	// r.once.Do(func() {
 	if err := r.cmd.Start(); err != nil {
 		r.pw.CloseWithError(err)
 		return
 	}
 	go r.wait()
-	// })
 }
 
+// Read implements the standard Read interface.  The first call to Read starts
+// the underlying XZ process.
 func (r *Reader) Read(p []byte) (int, error) {
-	// r.lazyInit()
-	r.once.Do(r.lazyInit)
+	r.initOnce.Do(r.lazyInit)
 	return r.pr.Read(p)
+}
+
+// Close closes the reader and stops the underlying XZ process if it is running,
+// but does not wait for it to exit.  It is safe to call Close multiple times.
+func (r *Reader) Close() error {
+	r.closeOnce.Do(func() {
+		// no-op if initOnce has been called,
+		// otherwise this prevents the call
+		r.initOnce.Do(func() {})
+		r.pr.CloseWithError(io.ErrClosedPipe)
+		r.pw.CloseWithError(io.ErrClosedPipe)
+		close(r.done)
+	})
+	return nil
 }
