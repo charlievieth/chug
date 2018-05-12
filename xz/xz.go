@@ -50,7 +50,7 @@ func validateXZ() {
 
 	path, err := exec.LookPath("xz")
 	if err != nil {
-		xzValidationErr = &ValidationError{Op: "locate xz binary", Err: err}
+		xzValidationErr = &ValidationError{Op: "missing xz binary", Err: err}
 		return
 	}
 	xzFullPath = path
@@ -106,41 +106,27 @@ func newReader(rd io.Reader) *Reader {
 	return xz
 }
 
-// TODO: remove ~4% gain is not worth it
-func NewFileReader(name string) (*Reader, error) {
-	if err := Validate(); err != nil {
-		return nil, err
-	}
-	pr, pw := io.Pipe()
-	cmd := exec.Command(xzFullPath, "--no-warn", "--stdout", "--decompress", name)
-	cmd.Stdout = pw
-	xz := &Reader{
-		cmd: cmd,
-		pr:  pr,
-		pw:  pw,
-	}
-	cmd.Stderr = &xz.stderr
-	return xz, nil
-}
-
 func (r *Reader) wait() {
 	err := r.cmd.Wait()
 	if err != nil {
-		err = fmt.Errorf("runtime error: %s: %s", err, r.stderr.String())
+		err = fmt.Errorf("runtime error: %s: %s", err,
+			strings.TrimSpace(r.stderr.String()))
 	}
 	r.pw.CloseWithError(err)
 }
 
 func (r *Reader) lazyInit() {
-	r.once.Do(func() {
-		if err := r.cmd.Start(); err != nil {
-			r.pw.CloseWithError(err)
-		}
-		go r.wait()
-	})
+	// r.once.Do(func() {
+	if err := r.cmd.Start(); err != nil {
+		r.pw.CloseWithError(err)
+		return
+	}
+	go r.wait()
+	// })
 }
 
 func (r *Reader) Read(p []byte) (int, error) {
-	r.lazyInit()
+	// r.lazyInit()
+	r.once.Do(r.lazyInit)
 	return r.pr.Read(p)
 }

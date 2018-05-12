@@ -2,9 +2,12 @@ package xz
 
 import (
 	"bytes"
+	"compress/gzip"
 	"io"
 	"io/ioutil"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -12,21 +15,21 @@ var xzNotFound bool
 var testData []byte
 
 func init() {
-	var err error
+	_, err := exec.LookPath("xz")
+	xzNotFound = (err != nil)
+	if xzNotFound {
+		return
+	}
+
 	testData, err = ioutil.ReadFile("testdata/bench.log.xz")
 	if err != nil {
 		panic("setup failed: " + err.Error())
 	}
 }
 
-func init() {
-	_, err := exec.LookPath("xz")
-	xzNotFound = (err == nil)
-}
-
-func TestXZ(t *testing.T) {
-	if !xzNotFound {
-		t.Skip("xz binary required for tests")
+func TestValidate(t *testing.T) {
+	if xzNotFound {
+		t.Skip("xz required for tests")
 	}
 	if err := Validate(); err != nil {
 		t.Error("Validation failed:", err)
@@ -36,9 +39,48 @@ func TestXZ(t *testing.T) {
 	}
 }
 
+func TestXZ(t *testing.T) {
+	if xzNotFound {
+		t.Skip("xz required for tests")
+	}
+	f, err := os.Open("testdata/bench.log.gz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := ioutil.ReadAll(gz)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	xz, err := NewReader(bytes.NewReader(testData))
+	if err != nil {
+		t.Fatal(err)
+	}
+	received, err := ioutil.ReadAll(xz)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(expected, received) {
+		dir, err := ioutil.TempDir("", "xz_test_")
+		if err != nil {
+			return
+		}
+		ioutil.WriteFile(filepath.Join(dir, "expected_content.log"), expected, 0644)
+		ioutil.WriteFile(filepath.Join(dir, "received_content.log"), received, 0644)
+		t.Fatalf("xz decompressed content did not match expected content.\n"+
+			"The expected and received contents were saved to %q for comparison.", dir)
+	}
+}
+
 func BenchmarkXZ(b *testing.B) {
-	if !xzNotFound {
-		b.Skip("xz binary required for tests")
+	if xzNotFound {
+		b.Skip("xz required for tests")
 	}
 	var w nopWriter
 	rd := bytes.NewReader(testData)
@@ -56,28 +98,9 @@ func BenchmarkXZ(b *testing.B) {
 	}
 }
 
-// TODO: remove ~4% gain is not worth it
-func BenchmarkXZ_File(b *testing.B) {
-	if !xzNotFound {
-		b.Skip("xz binary required for tests")
-	}
-	var w nopWriter
-	buf := make([]byte, 32*1024)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		r, err := NewFileReader("testdata/bench.log.xz")
-		if err != nil {
-			b.Fatal(err)
-		}
-		if _, err := io.CopyBuffer(w, r, buf); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
-
 func BenchmarkXZParallel(b *testing.B) {
-	if !xzNotFound {
-		b.Skip("xz binary required for tests")
+	if xzNotFound {
+		b.Skip("xz required for tests")
 	}
 	b.RunParallel(func(pb *testing.PB) {
 		var w nopWriter
@@ -86,26 +109,6 @@ func BenchmarkXZParallel(b *testing.B) {
 		for pb.Next() {
 			rd.Reset(testData)
 			r, err := NewReader(rd)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if _, err := io.CopyBuffer(w, r, buf); err != nil {
-				b.Fatal(err)
-			}
-		}
-	})
-}
-
-// TODO: remove ~4% gain is not worth it
-func BenchmarkXZParallel_File(b *testing.B) {
-	if !xzNotFound {
-		b.Skip("xz binary required for tests")
-	}
-	b.RunParallel(func(pb *testing.PB) {
-		var w nopWriter
-		buf := make([]byte, 32*1024)
-		for pb.Next() {
-			r, err := NewFileReader("testdata/bench.log.xz")
 			if err != nil {
 				b.Fatal(err)
 			}
