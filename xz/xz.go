@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 )
@@ -107,6 +108,7 @@ func newReader(rd io.Reader) *Reader {
 		done: make(chan struct{}),
 	}
 	cmd.Stderr = &xz.stderr
+	runtime.SetFinalizer(xz, (*Reader).Close)
 	return xz
 }
 
@@ -135,14 +137,19 @@ func (r *Reader) lazyInit() {
 
 // Read implements the standard Read interface.  The first call to Read starts
 // the underlying XZ process.
-func (r *Reader) Read(p []byte) (int, error) {
+func (r *Reader) Read(p []byte) (n int, err error) {
 	r.initOnce.Do(r.lazyInit)
-	return r.pr.Read(p)
+	n, err = r.pr.Read(p)
+	runtime.KeepAlive(r)
+	return
 }
 
 // Close closes the reader and stops the underlying XZ process if it is running,
 // but does not wait for it to exit.  It is safe to call Close multiple times.
 func (r *Reader) Close() error {
+	if r == nil {
+		return errors.New("xz: call to Close on nil *Reader")
+	}
 	r.closeOnce.Do(func() {
 		// no-op if initOnce has been called,
 		// otherwise this prevents the call
@@ -150,6 +157,7 @@ func (r *Reader) Close() error {
 		r.pr.CloseWithError(io.ErrClosedPipe)
 		r.pw.CloseWithError(io.ErrClosedPipe)
 		close(r.done)
+		runtime.SetFinalizer(r, nil)
 	})
 	return nil
 }
