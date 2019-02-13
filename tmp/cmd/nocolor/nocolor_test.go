@@ -64,3 +64,14 @@ func BenchmarkReadlinesNoColor(b *testing.B) {
 		}
 	}
 }
+
+func BenchmarkReadlinesNoColor_Fast(b *testing.B) {
+	r := NewReader(TestReader)
+	for i := 0; i < b.N; i++ {
+		TestReader.Seek(0, 0)
+		r.b.Reset(TestReader)
+		if _, err := ReadlinesNoColor(TestReader); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
