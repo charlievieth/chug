@@ -3,12 +3,17 @@ package util
 import (
 	"bufio"
 	"bytes"
+	"compress/bzip2"
 	"compress/flate"
 	"compress/gzip"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sync"
+
+	"github.com/charlievieth/chug/xz"
 )
 
 const defaultBufSize = 32 * 1024
@@ -139,10 +144,14 @@ func (r *Reader) ReadLine() ([]byte, error) {
 		}
 		r.buf = append(r.buf, frag...)
 	}
-	// do not include newline
-	if len(frag) > 1 {
-		r.buf = append(r.buf, frag[:len(frag)-1]...)
+	// trim newline
+	if n := len(frag) - 1; n != -1 && frag[n] == '\n' {
+		if runtime.GOOS == "windows" && n != 0 && frag[n-1] == '\r' {
+			n--
+		}
+		frag = frag[:n]
 	}
+	r.buf = append(r.buf, frag...)
 	return r.buf, err
 }
 
@@ -164,10 +173,14 @@ func (r *Reader) ReadLineNoColor() ([]byte, error) {
 		}
 		r.buf = append(r.buf, frag...)
 	}
-	// do not include newline
-	if len(frag) > 1 {
-		r.buf = append(r.buf, frag[:len(frag)-1]...)
+	// trim newline
+	if n := len(frag) - 1; n != -1 && frag[n] == '\n' {
+		if runtime.GOOS == "windows" && n != 0 && frag[n-1] == '\r' {
+			n--
+		}
+		frag = frag[:n]
 	}
+	r.buf = append(r.buf, frag...)
 	return StripColor(r.buf), err
 }
 
@@ -188,16 +201,15 @@ func OpenFile(name string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	var rc io.ReadCloser = f
-	if hasSuffix(name, ".gz") || hasSuffix(name, ".tgz") {
-		gr, err := gzip.NewReader(bufio.NewReaderSize(f, 32*1024))
-		if err != nil {
-			f.Close()
-			return nil, err
-		}
-		rc = gr
+	switch filepath.Ext(name) {
+	case ".xz":
+		return xz.NewReader(f)
+	case ".gz", ".tgz":
+		return gzip.NewReader(bufio.NewReaderSize(f, defaultBufSize))
+	case ".tbz2", ".bz2", ".bz", ".tbz":
+		return nopCloser{bzip2.NewReader(bufio.NewReaderSize(f, defaultBufSize))}, nil
 	}
-	return rc, nil
+	return f, nil
 }
 
 // hasSuffix tests whether the string s ends with suffix.  Same as
@@ -205,3 +217,9 @@ func OpenFile(name string) (io.ReadCloser, error) {
 func hasSuffix(s, suffix string) bool {
 	return len(s) >= len(suffix) && s[len(s)-len(suffix):] == suffix
 }
+
+type nopCloser struct {
+	io.Reader
+}
+
+func (nopCloser) Close() error { return nil }

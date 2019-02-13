@@ -105,24 +105,6 @@ func DecodeValidEntries(rd io.Reader) ([]Entry, error) {
 	return ents, err
 }
 
-// TODO: move to util - share with walk
-func openFile(name string) (io.ReadCloser, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	var rc io.ReadCloser = f
-	if hasSuffix(name, ".gz") || hasSuffix(name, ".tgz") {
-		gr, err := gzip.NewReader(bufio.NewReaderSize(f, 32*1024))
-		if err != nil {
-			f.Close()
-			return nil, err
-		}
-		rc = gr
-	}
-	return rc, nil
-}
-
 type Walker struct {
 	ents []Entry
 	mu   sync.Mutex
@@ -183,7 +165,7 @@ func (w *Walker) Parse(path string, typ os.FileMode, rc io.ReadCloser) error {
 		}
 	case typ.IsRegular():
 		var err error
-		xrc, err = openFile(path)
+		xrc, err = util.OpenFile(path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error (file - %s): %s\n", path, err)
 			return nil
@@ -342,7 +324,7 @@ func realMain() error {
 		return err
 	}
 	// TODO: move setup to Config
-	if conf.Debug {
+	if conf.Debug || conf.DebugColor {
 		prefix := "debug: "
 		if conf.DebugColor {
 			prefix = color.ColorGreen + prefix + color.StyleDefault
@@ -363,7 +345,7 @@ func realMain() error {
 	p := NewPrinter(out)
 
 	// TODO: make sure the arg is a file!!!
-	if set.NArg() == 1 && !isDir(set.Arg(0)) {
+	if set.NArg() == 1 && !isDir(set.Arg(0)) && !hasSuffix(set.Arg(0), ".tar") {
 		name := set.Arg(0)
 		Debugln("ripping file:", name)
 		t := time.Now()

@@ -35,6 +35,10 @@ var timestampTests = []timestampTest{
 		Time:  time.Unix(1, int64(time.Second/20)),
 	},
 	{
+		Stamp: "1.050",
+		Time:  time.Unix(1, int64(time.Second/20)),
+	},
+	{
 		Stamp: "1.00",
 		Time:  time.Unix(1, 0),
 	},

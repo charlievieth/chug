@@ -108,7 +108,7 @@ func (p *Printer) itoaSmall(i int) {
 	p.writeString(smallsString[i*2 : i*2+2])
 }
 
-func formatNano(b []byte, nanosec uint) []byte {
+func (p *Printer) formatNano(nanosec uint) {
 	u := nanosec
 	var buf [9]byte
 	for start := len(buf); start > 0; {
@@ -116,8 +116,8 @@ func formatNano(b []byte, nanosec uint) []byte {
 		buf[start] = byte(u%10 + '0')
 		u /= 10
 	}
-	b = append(b, '.')
-	return append(b, buf[:2]...)
+	p.writeByte('.')
+	p.write(buf[:2])
 }
 
 func (p *Printer) formatDateColor(code string, t time.Time) {
@@ -134,7 +134,8 @@ func (p *Printer) formatDateColor(code string, t time.Time) {
 	p.itoaSmall(t.Minute())
 	p.writeByte(':')
 	p.itoaSmall(t.Second())
-	p.buf = formatNano(p.buf, uint(t.Nanosecond()))
+
+	p.formatNano(uint(t.Nanosecond()))
 
 	p.clear()
 }
@@ -171,6 +172,10 @@ func (p *Printer) EncodePretty(log *LogEntry) error {
 		p.padStringColor(7, color.ColorRed, "[ERROR]")
 	case FATAL:
 		p.padStringColor(7, color.ColorRed, "[FATAL]")
+	default:
+		i := int(log.LogLevel)
+		s := smallsString[i*2 : i*2+2]
+		p.padStringColor(7, code, "["+s+"]")
 	}
 	p.writeByte(' ')
 	p.formatDateColor(code, log.Timestamp)
@@ -194,6 +199,7 @@ func (p *Printer) EncodePretty(log *LogEntry) error {
 	return err
 }
 
+// TODO: add colors for more sources
 func SourceColor(source string) string {
 	n := strings.IndexByte(source, ':')
 	if n != -1 {
